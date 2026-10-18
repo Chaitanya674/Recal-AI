@@ -49,6 +49,12 @@ def report(user: str, live: bool = False) -> dict:
         problems.append("Firestore is on but neither RECAL_ENCRYPTION_KEY nor RECAL_KMS_KEY "
                         "is set: stored secrets (OAuth tokens) are only "
                         "base64-obfuscated, not encrypted.")
+    if enc == "aes-gcm":
+        try:
+            fire.unseal(fire.seal("check"))
+        except Exception as e:  # noqa: BLE001 — saving Google tokens would fail
+            problems.append(f"RECAL_ENCRYPTION_KEY is unusable ({e}): connecting Google "
+                            "Calendar/Docs will fail. Use 32 random bytes, base64-encoded.")
     if firestore and not fire.media_enabled():
         problems.append("Firestore is on but RECAL_MEDIA_BUCKET is unset: reel media stays "
                         "on the local disk and is lost when the instance restarts.")

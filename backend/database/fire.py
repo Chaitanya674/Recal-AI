@@ -159,7 +159,9 @@ def needs_reseal(sealed: dict) -> bool:
 @lru_cache(maxsize=1)
 def _aes():
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    key = base64.b64decode(settings.RECAL_ENCRYPTION_KEY)
+    # standard (+/) or URL-safe (-_) base64 — Fernet.generate_key() emits the latter
+    raw = settings.RECAL_ENCRYPTION_KEY.strip().replace("-", "+").replace("_", "/")
+    key = base64.b64decode(raw + "=" * (-len(raw) % 4))
     if len(key) != 32:
         raise ValueError("RECAL_ENCRYPTION_KEY must be 32 bytes, base64-encoded")
     return AESGCM(key)

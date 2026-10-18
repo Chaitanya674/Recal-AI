@@ -10,10 +10,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ..features import calendar as cal
 from ..features import google
+from ..helper.logger import get_logger
 from ..schemas import AuthRequest, AuthResponse, UserOut
 from .chat_router import current_user
 
 router = APIRouter(prefix="/api")
+log = get_logger(__name__)
 
 
 @router.post("/auth")
@@ -68,6 +70,10 @@ def google_callback(state: str = "", code: str = "", error: str = ""):
             cal.sync_google(p["user"], force=True)
     except google.GoogleError as e:
         return RedirectResponse(back + urlencode({"connect_error": e.reason, "provider": p["provider"]}))
+    except Exception:  # noqa: BLE001 — never strand the user on a bare 500 page
+        log.exception("google callback failed for %s", p["provider"])
+        return RedirectResponse(back + urlencode({"connect_error": "server_error",
+                                                  "provider": p["provider"]}))
     return RedirectResponse(back + urlencode({"connected": p["provider"]}))
 
 
