@@ -220,10 +220,14 @@ def speak(text: str) -> bytes:
         models = [settings.MODEL_TTS]
         if settings.MODEL_TTS_FALLBACK and settings.MODEL_TTS_FALLBACK not in models:
             models.append(settings.MODEL_TTS_FALLBACK)
+        # Only the narration is spoken; the delivery style travels in speech_metadata
+        # (Gemini 3.x TTS reads any instruction placed in the text out loud).
+        contents = [genai_types.Content(role="user", parts=[genai_types.Part(
+            text=text, speech_metadata=genai_types.SpeechMetadata(style=settings.TTS_STYLE))])]
         for model in models:
             try:
                 resp = with_retry(lambda m=model: _client.models.generate_content(
-                    model=m, contents=f"Say in a clear, friendly teaching voice: {text}",
+                    model=m, contents=contents,
                     config=genai_types.GenerateContentConfig(
                         response_modalities=["AUDIO"],
                         speech_config=genai_types.SpeechConfig(voice_config=genai_types.VoiceConfig(

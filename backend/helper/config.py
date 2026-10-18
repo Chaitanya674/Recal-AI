@@ -46,6 +46,8 @@ class Settings:
     # has its own quota pool, so narration survives a spent quota on the first.
     MODEL_TTS_FALLBACK: str = os.getenv("MODEL_TTS_FALLBACK", "gemini-3.8-flash-lite-tts")
     TTS_VOICE: str = os.getenv("TTS_VOICE", "Kore")
+    # Delivery style for Gemini TTS (sent as speech metadata, never spoken)
+    TTS_STYLE: str = os.getenv("TTS_STYLE", "clear, friendly teaching voice")
     # Offline fallback voice (pyttsx3 -> OS speech engine): zero quota, zero cost.
     # Used when Gemini TTS is unavailable/exhausted; set LOCAL_TTS=0 to disable.
     LOCAL_TTS: bool = os.getenv("LOCAL_TTS", "1") == "1"
