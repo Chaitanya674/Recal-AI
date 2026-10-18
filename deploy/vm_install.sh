@@ -20,6 +20,15 @@ PROJECT_ID="$(md project/project-id)"
 DOMAIN="${DOMAIN:-${IP//./-}.sslip.io}"
 BASE_URL="https://$DOMAIN"
 
+# small VMs (e2-small, 2 GB): 2 GB of swap keeps the frontend build and reel rendering
+# from being OOM-killed
+if [ "$(free -m | awk '/^Mem:/{print $2}')" -lt 3500 ] && ! swapon --show | grep -q /swapfile; then
+  echo "==> Adding 2 GB swap"
+  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+  sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+fi
+
 echo "==> System packages"
 sudo apt-get update -qq
 sudo apt-get install -y -qq python3-venv python3-pip git curl caddy \
