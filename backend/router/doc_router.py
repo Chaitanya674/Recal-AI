@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from ..features import documents, memory, rehearse
 from ..helper import guardrails
 from ..schemas import Card
-from .chat_router import current_user
+from ..helper.identity import current_user
 
 router = APIRouter(prefix="/api/docs")
 

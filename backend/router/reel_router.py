@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from ..database import fire
 from ..features import render
-from .chat_router import current_user
+from ..helper.identity import current_user
 
 router = APIRouter(prefix="/api/reels")
 _FILES = re.compile(r"scene\d{1,2}\.wav|reel\.mp4|reel\.pdf")

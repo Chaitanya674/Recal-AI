@@ -101,14 +101,11 @@ refresh tokens also **expire after 7 days**.
 
 These were left unchanged on purpose. Each changes behaviour, so decide first.
 
-- [ ] **Every guest is the same user `demo`.** `POST /api/auth` always sets
-      `recal_user=demo`, so all judges share one chat history, calendar, graph and rate
-      limit (30 POST/min total). Fix: issue a random `g_<uuid>` per browser. Keep `demo`
-      only if you want judges to land on a pre-seeded demo.
-- [ ] **Cookies:** add `secure=True` to `set_cookie` now that the site is HTTPS-only.
-- [ ] **Google sign-in is not verified** (`auth_router.py`, `TODO(P5)`). Any string is
-      accepted as an `id_token`. Verify it with `google.oauth2.id_token.verify_oauth2_token`,
-      or switch to Firebase Auth, before exposing a sign-in button.
+- [x] **Private guest profiles (done).** Every browser gets its own random guest ID
+      (`backend/helper/identity.py`), so judges never see each other's data. The cookie is
+      Secure + HttpOnly. The old shared `demo` ID is rejected and replaced.
+- [ ] **Google account sign-in** is disabled (an `id_token` is ignored) until it is
+      verified server-side with `google.oauth2.id_token.verify_oauth2_token` or Firebase Auth.
 - [ ] **Wikipedia returned 403** in testing. Its API requires a descriptive User-Agent
       with contact info, so change `RecalBot/0.1` in `knowledge.py`. Search grounding
       through Gemini still works without it.

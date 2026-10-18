@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request
 
 from ..features import meeting
 from ..helper import guardrails
-from .chat_router import current_user
+from ..helper.identity import current_user
 
 router = APIRouter(prefix="/api/meeting")
 

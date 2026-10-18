@@ -22,14 +22,11 @@ from ..features import calendar as cal
 from ..features import google, intents, knowledge, material, memory, motion
 from ..features.llm import chat_stream, model_id
 from ..helper import guardrails
+from ..helper.identity import current_user
 from ..helper.config import settings
 from ..schemas import Card, ChatRequest, Connections, Receipt
 
 router = APIRouter(prefix="/api")
-
-
-def current_user(request: Request) -> str:
-    return request.cookies.get("recal_user") or "demo"
 
 
 def current_conv(request: Request) -> str:

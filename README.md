@@ -154,6 +154,8 @@ to Wikipedia, and finally to the model's own knowledge. That last fallback is la
     prompt injection, secret redaction on every output, and per-user rate limits.
   - OAuth tokens are encrypted at rest with AES-256-GCM, and Firestore denies all client access.
   - No API keys on the server: it authenticates as its service account.
+  - **Every visitor is private:** each browser gets its own random guest ID, so judges
+    never see each other's chats, videos, calendar or uploads.
 
 ## Run it locally
 
@@ -217,7 +219,8 @@ study notes, document upload and review, and the mock meeting. It passes 16/16.
 
 ## Known limitations
 
-- Guest visitors currently share one demo profile. Per-visitor guest IDs are the next step.
+- There's no account sign-in yet. Each browser gets its own private guest profile, so
+  clearing cookies or switching browsers starts a fresh one.
 - The Google OAuth app is unverified, so Calendar and Docs connect shows Google's
   "unverified app" screen (*Advanced → Go to Recal*).
 - One backend process: OAuth state and graph caches are in-process, sized for a demo and

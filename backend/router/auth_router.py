@@ -2,31 +2,28 @@
 (Google Calendar, Google Docs -> NotebookLM)."""
 from __future__ import annotations
 
-import uuid
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ..features import calendar as cal
 from ..features import google
 from ..helper.logger import get_logger
+from ..helper.identity import current_user
 from ..schemas import AuthRequest, AuthResponse, UserOut
-from .chat_router import current_user
 
 router = APIRouter(prefix="/api")
 log = get_logger(__name__)
 
 
 @router.post("/auth")
-def auth(body: AuthRequest, response: Response) -> AuthResponse:
-    if body.guest or not body.id_token:
-        response.set_cookie("recal_user", "demo", httponly=True, samesite="lax")
-        return AuthResponse(ok=True, user=UserOut(id="demo", name="Guest", guest=True))
-    # TODO(P5): verify id_token via google.oauth2.id_token.verify_oauth2_token
-    uid = "u_" + uuid.uuid5(uuid.NAMESPACE_URL, body.id_token[:64]).hex[:10]
-    response.set_cookie("recal_user", uid, httponly=True, samesite="lax")
-    return AuthResponse(ok=True, user=UserOut(id=uid, name="Google user", guest=False))
+def auth(body: AuthRequest, request: Request) -> AuthResponse:  # noqa: ARG001
+    """Everyone is a private guest: the identity middleware already issued this
+    browser its own id. Google sign-in (body.id_token) is ignored until the token is
+    verified server-side — an unverified token must never choose an account."""
+    return AuthResponse(ok=True, user=UserOut(id=current_user(request), name="Guest",
+                                              guest=True))
 
 
 # ---- Google: OAuth web flow for Calendar (read) + Docs (export) ---------------

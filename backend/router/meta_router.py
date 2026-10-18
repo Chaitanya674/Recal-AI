@@ -5,13 +5,10 @@ from fastapi import APIRouter, Request
 
 from ..features import llm, memory
 from ..helper import diagnostics
+from ..helper.identity import current_user
 from ..schemas import FeedbackRequest, FeedbackResponse
 
 router = APIRouter(prefix="/api")
-
-
-def current_user(request: Request) -> str:
-    return request.cookies.get("recal_user") or "demo"
 
 
 @router.post("/feedback")

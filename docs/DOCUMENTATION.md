@@ -751,6 +751,7 @@ What each layer guards against:
 |---|---|
 | Harmful requests | blocked by the Lite-model safety check; self-harm gets a supportive message |
 | A web page saying "ignore your instructions…" | outside text is wrapped and labelled as data only |
+| Other visitors seeing your work | every browser gets its own random, unguessable guest ID (secure, HttpOnly cookie, 180 days); every chat, card, session, upload, video and Google connection is stored under it, and videos check their owner before downloading |
 | Leaking keys | none are stored in the app: it signs in to Google Cloud as its own service account |
 | Stolen database | Google sign-in keys are encrypted (AES-256-GCM); browsers can't access the database at all |
 | Safety-check outage | Recal lets messages through (and logs it) rather than locking everyone out |
@@ -909,7 +910,7 @@ cleans up after itself. On the last full run, against real Gemini, it passed **1
 
 | Today | Next step |
 |---|---|
-| Guest visitors share one demo profile | give every browser its own private guest profile, and support real Google sign-in |
+| Each browser is a private guest; clearing cookies starts a fresh profile | real Google sign-in (verified ID tokens), so a profile follows you across devices |
 | Recal runs as one server process | move sign-in state into the database and run on Cloud Run for scale |
 | Google shows an "unverified app" warning | complete Google's app verification |
 | A video on a brand-new topic takes 2–3 minutes | reuse sources across users, and play scenes while the rest are still being made |
@@ -919,14 +920,15 @@ cleans up after itself. On the last full run, against real Gemini, it passed **1
 
 ## 20. Reference: API
 
-All endpoints are under `/api`. Your identity comes from the `recal_user` cookie, and the
+All endpoints are under `/api`. Your identity comes from the `recal_user` cookie (a private
+guest ID issued on your first request), and the
 current chat from `recal_conv`.
 
 | Method | Path | Send | Get back |
 |---|---|---|---|
 | POST | `/api/chat` | `{message}` or `{action:{type,…}}` | live updates stream (§4) |
 | GET / POST | `/api/conversations` | — | list chats / start a new chat |
-| POST | `/api/auth` | `{guest:true}` | your user + cookie |
+| POST | `/api/auth` | `{guest:true}` | your private guest profile |
 | GET | `/api/connect/calendar` | `?return_to=` | Google sign-in link |
 | POST | `/api/connect/notebook` | `{return_to}` | Google sign-in link (Docs) |
 | GET | `/api/connect/google/callback` | from Google | back to the app |

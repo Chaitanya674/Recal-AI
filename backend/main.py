@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .helper import guardrails
+from .helper import guardrails, identity
 from .helper.config import settings
 from .helper.logger import get_logger
 from .router.auth_router import router as auth_router
@@ -29,7 +29,7 @@ app.include_router(meeting_router)
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     if request.method == "POST" and request.url.path.startswith(guardrails.RATE_LIMITED_PREFIXES):
-        who = request.cookies.get("recal_user") or (request.client.host if request.client else "?")
+        who = identity.current_user(request)      # per visitor, never shared
         ok, retry = guardrails.limiter.allow(who)
         if not ok:
             log.warning("rate limit hit: %s on %s", who, request.url.path)
@@ -52,6 +52,16 @@ async def log_requests(request: Request, call_next):
     emit = log.warning if response.status_code >= 500 else log.info
     emit("%s %s -> %d (%.0f ms)", request.method, request.url.path,
          response.status_code, ms)
+    return response
+
+
+@app.middleware("http")          # registered last = runs first: identity before everything
+async def visitor_identity(request: Request, call_next):
+    """Every browser gets its own private guest profile (helper/identity.py)."""
+    new = identity.assign(request) if request.url.path.startswith("/api") else None
+    response = await call_next(request)
+    if new:
+        identity.remember(request, response, new)
     return response
 
 
