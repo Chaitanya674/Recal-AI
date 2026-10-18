@@ -26,12 +26,14 @@ echo "==> Enabling APIs (Vertex AI, Firestore, Storage, Compute, Calendar, Docs,
 gcloud services enable \
   aiplatform.googleapis.com firestore.googleapis.com storage.googleapis.com \
   compute.googleapis.com iamcredentials.googleapis.com logging.googleapis.com \
+  secretmanager.googleapis.com \
   calendar-json.googleapis.com docs.googleapis.com drive.googleapis.com
 
 echo "==> Runtime service account (the VM's identity: no keys on disk)"
 exists gcloud iam service-accounts describe "$SA_EMAIL" ||
   gcloud iam service-accounts create "$SA_NAME" --display-name "Recal runtime"
-for role in roles/aiplatform.user roles/datastore.user roles/logging.logWriter; do
+for role in roles/aiplatform.user roles/datastore.user roles/logging.logWriter \
+            roles/secretmanager.secretAccessor; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" --condition=None --quiet \
     --member "serviceAccount:$SA_EMAIL" --role "$role" >/dev/null
 done
@@ -85,6 +87,5 @@ Done.
 Next:
   gcloud compute ssh $VM_NAME --zone $ZONE
   git clone https://github.com/Chaitanya674/Recall.git recal && cd recal
-  # copy your .env up first:  gcloud compute scp .env $VM_NAME:~/recal/.env --zone $ZONE
-  bash deploy/vm_install.sh
+  bash deploy/vm_install.sh   # pulls .env from Secret Manager "recal-env" if it exists
 EOF

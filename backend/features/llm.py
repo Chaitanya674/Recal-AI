@@ -26,9 +26,15 @@ try:
     from google import genai  # type: ignore
     from google.genai import types as genai_types  # type: ignore
 
-    _client = (genai.Client(vertexai=True, project=settings.GOOGLE_CLOUD_PROJECT,
-                            location=settings.GOOGLE_CLOUD_LOCATION)
-               if settings.GOOGLE_CLOUD_PROJECT and not settings.MOCK else None)
+    if settings.MOCK:
+        _client = None
+    elif settings.GOOGLE_CLOUD_API_KEY:      # API key: served from the global endpoint
+        _client = genai.Client(vertexai=True, api_key=settings.GOOGLE_CLOUD_API_KEY)
+    elif settings.GOOGLE_CLOUD_PROJECT:
+        _client = genai.Client(vertexai=True, project=settings.GOOGLE_CLOUD_PROJECT,
+                               location=settings.GOOGLE_CLOUD_LOCATION)
+    else:
+        _client = None
 except Exception:  # noqa: BLE001
     _client = None
 
@@ -103,6 +109,7 @@ def model_id(tier: str) -> str:
 def llm_status() -> dict:
     """Read-only model configuration for the UI (models are set in .env only)."""
     return {"mock": settings.MOCK, "source": "none" if _no_llm() else "vertex",
+            "auth": "api_key" if settings.GOOGLE_CLOUD_API_KEY else "service_account",
             "project": settings.GOOGLE_CLOUD_PROJECT,
             "location": settings.GOOGLE_CLOUD_LOCATION, **{
                 f"model_{t}": m for t, m in _MODELS.items()}}

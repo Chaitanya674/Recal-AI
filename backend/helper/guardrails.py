@@ -107,11 +107,13 @@ _SECRET_SHAPES = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}"),          # OpenAI / Anthropic-style keys
     re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),                        # Google API key
+    re.compile(r"\bAQ\.[0-9A-Za-z_-]{30,}"),                         # Google Cloud bound API key
     re.compile(r"\bGOCSPX-[A-Za-z0-9_-]{10,}"),                      # Google OAuth client secret
     re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),                       # Google OAuth access token
     re.compile(r"\b1//0[0-9A-Za-z_-]{20,}"),                         # Google OAuth refresh token
 ]
-_CONFIGURED = ("GOOGLE_OAUTH_CLIENT_SECRET", "SESSION_SECRET", "RECAL_ENCRYPTION_KEY")
+_CONFIGURED = ("GOOGLE_CLOUD_API_KEY", "GOOGLE_OAUTH_CLIENT_SECRET", "SESSION_SECRET",
+               "RECAL_ENCRYPTION_KEY")
 
 
 def _configured_secrets() -> list[str]:

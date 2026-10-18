@@ -16,7 +16,8 @@ os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "global")
 
 
 def _mock_from_env() -> bool:
-    return os.getenv("MOCK", "") == "1" or not os.getenv("GOOGLE_CLOUD_PROJECT", "")
+    return os.getenv("MOCK", "") == "1" or not (os.getenv("GOOGLE_CLOUD_PROJECT", "")
+                                                or os.getenv("GOOGLE_CLOUD_API_KEY", ""))
 
 
 @dataclass
@@ -30,6 +31,10 @@ class Settings:
     SESSION_SECRET: str = os.getenv("SESSION_SECRET", "change-me")
     GOOGLE_CLOUD_PROJECT: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
     GOOGLE_CLOUD_LOCATION: str = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
+    # Optional Vertex AI API key (Google Cloud console, billed to the project's
+    # credits). Set: every Gemini call uses it. Blank: ADC / the VM's service account.
+    # Firestore and Cloud Storage always use ADC — an API key can't reach them.
+    GOOGLE_CLOUD_API_KEY: str = os.getenv("GOOGLE_CLOUD_API_KEY", "")
     MAX_STUDY_MIN_PER_DAY: int = int(os.getenv("MAX_STUDY_MIN_PER_DAY", "150"))
     # Reels: Gemini TTS narration (same client; empty MODEL_TTS = captions only) and the
     # cosine floor for "this chunk is about the topic" (real embeddings only)

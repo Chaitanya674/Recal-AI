@@ -32,7 +32,12 @@ fi
 
 echo "==> .env"
 cd "$APP_DIR"
-if [ ! -f .env ]; then
+ENV_SECRET="${ENV_SECRET:-recal-env}"
+if gcloud secrets describe "$ENV_SECRET" >/dev/null 2>&1; then
+  # source of truth: Secret Manager (needs roles/secretmanager.secretAccessor on the VM's SA)
+  (umask 077; gcloud secrets versions access latest --secret="$ENV_SECRET" > .env)
+  echo "    pulled from Secret Manager: $ENV_SECRET (latest version)"
+elif [ ! -f .env ]; then
   cat > .env <<EOF
 MOCK=
 SESSION_SECRET=$(openssl rand -hex 32)

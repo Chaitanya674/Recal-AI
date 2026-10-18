@@ -146,6 +146,6 @@ These were left unchanged on purpose. Each changes behaviour, so decide first.
       (`gcloud compute instances stop recal-vm`) and release the static IP so the
       credits last.
 
-**Rough cost:** e2-standard-2 ≈ $1.6/day, external IP ≈ $0.12/day, Firestore and GCS are
+**Rough cost:** e2-standard-2 ≈ $1.6/day, static IP ≈ $0.25/day, Firestore and GCS are
 cents. Vertex usage depends on demo volume, and Pro and TTS calls dominate. A week of
 judging should stay well under $50 of the $300 credit.

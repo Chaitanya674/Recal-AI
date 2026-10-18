@@ -48,6 +48,10 @@ class AgentFactory:
         from google.adk.agents import LlmAgent
         model = {"lite": settings.MODEL_LITE, "fast": settings.MODEL_FAST}.get(
             tier, settings.MODEL_DEEP)
+        if settings.GOOGLE_CLOUD_API_KEY:   # same auth as features/llm.py's client
+            from google.adk.models import Gemini
+            model = Gemini(model=model, client_kwargs={
+                "vertexai": True, "api_key": settings.GOOGLE_CLOUD_API_KEY})
         kwargs = dict(
             name=name,
             model=model,
