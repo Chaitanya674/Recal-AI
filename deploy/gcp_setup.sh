@@ -86,6 +86,6 @@ Done.
 
 Next:
   gcloud compute ssh $VM_NAME --zone $ZONE
-  git clone https://github.com/Chaitanya674/Recall.git recal && cd recal
+  git clone https://github.com/Chaitanya674/Recal-AI.git recal && cd recal
   bash deploy/vm_install.sh   # pulls .env from Secret Manager "recal-env" if it exists
 EOF

@@ -40,7 +40,7 @@ All of these are served from Vertex location `global`. Override any of them in `
 
 ```bash
 gcloud compute ssh recal-vm --zone us-central1-a
-git clone https://github.com/Chaitanya674/Recall.git recal && cd recal
+git clone https://github.com/Chaitanya674/Recal-AI.git recal && cd recal
 bash deploy/vm_install.sh              # first run creates .env; fill OAuth id/secret, re-run
 ```
 
