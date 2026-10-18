@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+# Firebase service-account key — never commit
+firebase-key.json
+.firebaserc
+firebase.json
+firestore.indexes.json
+firestore.rules
+logs/
+# full Firestore exports written by scripts/migrate_firestore.py (contain user data)
+backups/
+backend/recal.db
+# local calendar + Google OAuth tokens
+backend/features/recal.db
+# rendered reels: narration WAVs, MP4s, PDF slides
+backend/media/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/

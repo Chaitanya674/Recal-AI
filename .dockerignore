@@ -1,0 +1,8 @@
+**/__pycache__
+**/node_modules
+frontend/dist
+.env
+.git
+tests
+backend/features/recal.db
+backend/media
