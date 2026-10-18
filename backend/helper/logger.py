@@ -5,6 +5,7 @@ Usage:   from ..helper.logger import get_logger
          log.info("ingested %s (%d chunks)", name, n)
 
 Env:     LOG_LEVEL  DEBUG | INFO | WARNING   (default INFO)
+         LOG_TO_FILE 0 = console only, no log files (deploy/start.sh sets this)
          LOG_DIR    where recal.log lives    (default <repo>/logs; file logging
                     is skipped silently on a read-only disk, e.g. some PaaS)
 
@@ -47,6 +48,10 @@ def setup_logging() -> None:
     console = logging.StreamHandler()
     console.setFormatter(fmt)
     root.addHandler(console)
+    if os.getenv("LOG_TO_FILE", "1") == "0":   # e.g. small VMs: console only, no files
+        for name in _NOISY:
+            logging.getLogger(name).setLevel(max(level, logging.INFO))
+        return
     log_dir = Path(os.getenv("LOG_DIR") or Path(__file__).resolve().parents[2] / "logs")
     try:
         log_dir.mkdir(parents=True, exist_ok=True)

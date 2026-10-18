@@ -5,14 +5,15 @@
 #   DOMAIN=recal.example.com bash deploy/vm_install.sh   # your own domain (A record -> VM IP)
 #
 # Re-run it after every `git pull` to redeploy. What it sets up:
-#   - backend: uvicorn on 127.0.0.1:8000 as systemd service "recal" (1 worker: OAuth
-#     state and graph caches live in-process), serving the built frontend too
+#   - backend: uvicorn on 127.0.0.1:8000 started with nohup by deploy/start.sh (1 worker:
+#     OAuth state and graph caches live in-process), serving the built frontend too;
+#     restarted on reboot by an @reboot cron entry
 #   - Caddy on :80/:443 with an automatic Let's Encrypt certificate (Google OAuth
 #     requires an https redirect URI on a real domain)
+#   - no logs on disk: app output -> /dev/null, system journal kept in RAM only
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-RUN_USER="$(id -un)"
 md() { curl -fs -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/$1"; }
 
 IP="$(md instance/network-interfaces/0/access-configs/0/external-ip)"
@@ -31,13 +32,24 @@ fi
 
 echo "==> System packages"
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3-venv python3-pip git curl caddy \
+sudo apt-get install -y -qq python3-venv python3-pip git curl caddy cron \
   espeak-ng libespeak-ng1 fonts-dejavu-core >/dev/null
 # vite 8 needs Node >= 20.19 / 22.12; Ubuntu's nodejs is older
 if ! node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=12)?0:1)' 2>/dev/null; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - >/dev/null
   sudo apt-get install -y -qq nodejs >/dev/null
 fi
+sudo apt-get clean
+
+echo "==> Logs: system journal in RAM only (16 MB cap), nothing written to disk"
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]
+Storage=volatile
+RuntimeMaxUse=16M
+' |
+  sudo tee /etc/systemd/journald.conf.d/recal.conf >/dev/null
+sudo systemctl restart systemd-journald
+sudo rm -rf /var/log/journal/* "$APP_DIR/logs"
 
 echo "==> .env"
 cd "$APP_DIR"
@@ -72,33 +84,23 @@ chmod 600 .env
 
 echo "==> Backend (Python venv)"
 [ -d .venv ] || python3 -m venv .venv
-.venv/bin/pip install -q --upgrade pip
-.venv/bin/pip install -q -r requirements.txt
+.venv/bin/pip install -q --no-cache-dir --upgrade pip
+.venv/bin/pip install -q --no-cache-dir -r requirements.txt
 
 echo "==> Frontend (vite build -> frontend/dist, served by the backend)"
+# node_modules and the npm cache are only needed for the build: removed to save disk
 (cd frontend && npm ci --no-audit --no-fund --loglevel=error && npm run build >/dev/null)
+rm -rf frontend/node_modules
+npm cache clean --force >/dev/null 2>&1 || true
 
-echo "==> systemd service: recal"
-sudo tee /etc/systemd/system/recal.service >/dev/null <<EOF
-[Unit]
-Description=Recal backend (FastAPI + built frontend)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=$RUN_USER
-WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
-Restart=always
-RestartSec=3
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl daemon-reload
-sudo systemctl enable recal >/dev/null 2>&1
-sudo systemctl restart recal
+echo "==> Backend: nohup (deploy/start.sh), restarted on reboot via cron"
+if [ -f /etc/systemd/system/recal.service ]; then   # older systemd setup
+  sudo systemctl disable --now recal >/dev/null 2>&1 || true
+  sudo rm -f /etc/systemd/system/recal.service && sudo systemctl daemon-reload
+fi
+bash deploy/start.sh
+(crontab -l 2>/dev/null | grep -v "# recal-start" || true
+ echo "@reboot bash $APP_DIR/deploy/start.sh >/dev/null 2>&1 # recal-start") | crontab -
 
 echo "==> Caddy (HTTPS for $DOMAIN)"
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
@@ -116,17 +118,20 @@ sudo systemctl enable caddy >/dev/null 2>&1
 sudo systemctl reload caddy || sudo systemctl restart caddy
 
 echo "==> Health check"
-for _ in $(seq 1 30); do
+for _ in $(seq 1 90); do      # first boot on a 2 GB VM can take a while
   curl -fs http://127.0.0.1:8000/api/health >/dev/null && break
   sleep 1
 done
 curl -fs http://127.0.0.1:8000/api/health |
-  python3 -c 'import json,sys; h=json.load(sys.stdin); print("    mode:", h["mode"]); [print("    !", p) for p in h["problems"]]'
+  python3 -c 'import json,sys; h=json.load(sys.stdin); print("    mode:", h["mode"]); [print("    !", p) for p in h["problems"]]' ||
+  echo "    backend not answering yet — see why with: bash deploy/start.sh fg"
 
 cat <<EOF
 
 Recal is up:  $BASE_URL
   Live model check:   $BASE_URL/api/health?live=1
-  Logs:               journalctl -u recal -f
+  Restart backend:    bash deploy/start.sh        (stop: bash deploy/start.sh stop)
+  Debug (live logs):  bash deploy/start.sh fg     (on screen only; Ctrl+C, then start.sh)
+  Disk usage:         df -h /
   OAuth redirect URI: $BASE_URL/api/connect/google/callback   (add it to the OAuth client)
 EOF
