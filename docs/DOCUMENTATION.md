@@ -1,926 +1,1003 @@
-# Recal: Technical Documentation
+# How Recal Works
 
-> Architecture, flows, data model and API reference for Recal, an AI learning agent built on
-> Gemini 3.x (Vertex AI), Google ADK and Firestore. For the product overview see the
-> [README](../README.md); for deployment see [deploy/README.md](../deploy/README.md).
+> This guide walks through Recal from the learner's point of view, then shows the parts
+> underneath. Every section starts with *what you see*, then *what Recal does behind the
+> scenes*, with a diagram. Developers will find the file names in the **Under the hood**
+> notes and the full reference tables at the end.
+>
+> For a quick overview see the [README](../README.md). To run it on Google Cloud, see the
+> [deployment guide](../deploy/README.md).
 
 ## Contents
 
-1. [System overview](#1-system-overview)
-2. [Architecture](#2-architecture)
-3. [Request lifecycle: one chat door](#3-request-lifecycle-one-chat-door)
-4. [The Switchboard: model routing and verification](#4-the-switchboard-model-routing-and-verification)
-5. [Knowledge graph and source acquisition](#5-knowledge-graph-and-source-acquisition)
-6. [60-second visual reels](#6-60-second-visual-reels)
-7. [Managed study sessions](#7-managed-study-sessions)
-8. [Renegotiation and session edits](#8-renegotiation-and-session-edits)
-9. [AI client: document review, mock meeting, rehearsal](#9-ai-client-document-review-mock-meeting-rehearsal)
-10. [Concierge agent (Google ADK)](#10-concierge-agent-google-adk)
-11. [Style memory](#11-style-memory)
-12. [Google Calendar and Docs integration](#12-google-calendar-and-docs-integration)
-13. [Guardrails and security](#13-guardrails-and-security)
-14. [Data model](#14-data-model)
-15. [Resilience and graceful degradation](#15-resilience-and-graceful-degradation)
-16. [API reference](#16-api-reference)
-17. [Configuration reference](#17-configuration-reference)
-18. [Frontend](#18-frontend)
-19. [Deployment architecture](#19-deployment-architecture)
-20. [Testing and observability](#20-testing-and-observability)
-21. [Limitations and roadmap](#21-limitations-and-roadmap)
+1. [Recal in one minute](#1-recal-in-one-minute)
+2. [Words used in this guide](#2-words-used-in-this-guide)
+3. [The big picture](#3-the-big-picture)
+4. [What happens when you send a message](#4-what-happens-when-you-send-a-message)
+5. [How Recal picks a model and checks its work](#5-how-recal-picks-a-model-and-checks-its-work)
+6. [Your knowledge library](#6-your-knowledge-library)
+7. [Making a 60-second video explainer](#7-making-a-60-second-video-explainer)
+8. [Planning study time and writing study books](#8-planning-study-time-and-writing-study-books)
+9. [When your week changes](#9-when-your-week-changes)
+10. [Practising with an AI client](#10-practising-with-an-ai-client)
+11. [The chat assistant](#11-the-chat-assistant)
+12. [Learning your teaching style](#12-learning-your-teaching-style)
+13. [Connecting Google Calendar and Docs](#13-connecting-google-calendar-and-docs)
+14. [Keeping you safe](#14-keeping-you-safe)
+15. [Where your data lives](#15-where-your-data-lives)
+16. [When something goes wrong: Plan B](#16-when-something-goes-wrong-plan-b)
+17. [Running on Google Cloud](#17-running-on-google-cloud)
+18. [How we test it](#18-how-we-test-it)
+19. [What's next](#19-whats-next)
+20. [Reference: API](#20-reference-api)
+21. [Reference: settings](#21-reference-settings)
+22. [Reference: code map](#22-reference-code-map)
 
 ---
 
-## 1. System overview
+## 1. Recal in one minute
 
-Recal turns a learning intent into scheduled, grounded, verified study material:
+Imagine you have a client demo on Friday and you need to understand Kafka before then.
+You type one sentence into Recal:
 
-| Capability | Entry point | Core modules |
-|---|---|---|
-| Visual reels (60 s, narrated, MP4/PDF) | chat: *"explain X visually"* | `motion`, `reel_engine`, `render`, `knowledge` |
-| Study planning on the real calendar | chat: *"plan 2 hours for X"* | `calendar`, `google` |
-| Study books with citations + critic | chat: *"write me notes on X"* | `material`, `knowledge` |
-| Re-planning (urgent work, low energy) | quick actions / chat | `calendar` |
-| Grounded Q&A | chat: a question | `knowledge`, `llm` |
-| Deck/doc review, mock meeting, rehearsal | Practice tab | `documents`, `meeting`, `rehearse` |
-| Learned teaching style | 👍 / 👎 on any output | `memory` |
+> *"Plan 2 hours tomorrow evening for Kafka and prepare notes."*
 
-**Design principles**
+Here's what happens next:
 
-1. **One door.** Every chat message goes through `POST /api/chat`. A planner model splits it
-   into ordered steps, and there is no keyword routing.
-2. **Verify, don't trust.** Model output is checked by code (schemas, citations, slot IDs)
-   before it is used. A failed check gets one escalation to the Pro tier with the reason.
-3. **Always degrade, never die.** Every pipeline has a deterministic fallback.
-4. **Grounded by construction.** Reels, notes and answers are built from ingested chunks and
-   cite chunk IDs, and outside text is always marked as untrusted data.
-5. **Auditable.** Every result carries a receipt (model, thinking level, verified, escalated).
+1. Recal **reads your calendar** and finds a free evening slot.
+2. It **books two study sessions** that fit your 2 hours exactly.
+3. It **searches the web** for good Kafka pages, reads them and saves the key passages.
+4. It **writes a study book** from those pages, with a citation on every claim, and a second
+   AI "critic" reviews the book before you see it.
+
+Later you ask *"Show me Kafka partitions as a 1-minute visual"* and get a narrated, animated
+video built from the same sources. On Thursday, an urgent meeting lands on your calendar.
+You press **Urgent meeting** and Recal moves your study sessions out of the way.
+
+Before the demo, you upload your slides. Recal plays the client and asks you the hard
+questions, then tells you which answers didn't land.
+
+**What makes it different:** Recal doesn't just answer questions. It plans, it adapts when
+your week falls apart, and it checks every AI output before you see it.
 
 ---
 
-## 2. Architecture
+## 2. Words used in this guide
 
-### 2.1 Component view
+| Word | What it means here |
+|---|---|
+| **Gemini** | Google's AI models. Recal uses several sizes of them through Google Cloud. |
+| **Model tier** | Which size of Gemini does a job: **Lite** (instant decisions), **Fast** (everyday work) or **Pro** (hard thinking). |
+| **Source** | A web page or document Recal has read for you. |
+| **Passage** | A short piece of a source, a few sentences long. Recal cites passages, not whole pages. |
+| **Knowledge library** | Everything Recal has read for you, organised as sources → passages → ideas. (Technically a *knowledge graph*.) |
+| **Citation** | A small number linking a claim to the passage it came from. |
+| **Card** | A result shown in the app: a plan, a video, a study book, a review. |
+| **Receipt** | A label on every card saying which model made it and whether it passed Recal's checks. |
+| **Check** | Code that verifies an AI output, for example "does every scene cite a real passage?" |
+| **Retry with Pro** | When a check fails, Recal asks the stronger Pro model once more, telling it what was wrong. |
+| **Plan B** | The safe fallback Recal uses when the AI fails, so you always get a result. |
+| **Mock mode** | A demo mode with no AI calls, used when Google Cloud isn't configured. |
+
+---
+
+## 3. The big picture
+
+Recal is one web app, a **React website** talking to a **Python server** (FastAPI). The
+server uses Google Cloud for everything AI and storage related.
 
 ```mermaid
 flowchart TB
-    subgraph Client["Browser"]
-        UI["React 19 + Vite SPA<br/>Chat · Canvas · Week · Cards · Practice"]
+    YOU(["You, in the browser"]) --> APP["Recal website<br/>chat, videos, calendar, practice"]
+    APP --> SERVER["Recal server"]
+
+    subgraph BRAIN["Recal's brain"]
+        SAFE["Safety check"]
+        PLAN["Request planner<br/>splits your message into steps"]
+        PICK["Model picker<br/>chooses Lite, Fast or Pro, then checks the answer"]
+        HELP["Chat assistant<br/>for open-ended questions"]
     end
 
-    subgraph Server["FastAPI backend (uvicorn, 1 worker)"]
-        MW["Middleware<br/>rate limit · request log"]
-        subgraph Routers
-            CHAT["chat_router<br/>/api/chat SSE"]
-            AUTH["auth_router<br/>/api/auth · /api/connect"]
-            DOCR["doc_router<br/>/api/docs"]
-            MEET["meeting_router<br/>/api/meeting"]
-            REEL["reel_router<br/>/api/reels"]
-            META["meta_router<br/>/api/health · feedback"]
-        end
-        subgraph Features
-            INT["intents<br/>planner"]
-            LLM["llm<br/>Switchboard"]
-            KNOW["knowledge<br/>graph + search"]
-            MOT["motion<br/>reel pipeline"]
-            REN["render + reel_engine<br/>MP4 / PDF"]
-            MAT["material<br/>study books"]
-            CAL["calendar<br/>slots · plan · replan"]
-            DOC["documents · meeting · rehearse"]
-            MEM["memory<br/>chat · cards · style"]
-            GOO["google<br/>OAuth · Calendar · Docs"]
-        end
-        AG["agents<br/>ADK concierge"]
-        HLP["helper<br/>guardrails · prompts.yml · config"]
-        DB["database<br/>fire · schema · graph · vectors"]
+    subgraph SKILLS["Recal's skills"]
+        LIB["Knowledge library<br/>reads and remembers sources"]
+        VID["Video maker"]
+        CAL["Study planner"]
+        BOOK["Study book writer"]
+        CLIENT["AI client<br/>reviews and mock meetings"]
+        STYLE["Style memory"]
     end
 
-    subgraph GCP["Google Cloud"]
-        VX[("Vertex AI<br/>Gemini 3.x")]
-        FS[("Firestore")]
-        GCS[("Cloud Storage")]
-        SM[("Secret Manager")]
-    end
-    GAPI[("Google Calendar /<br/>Docs / Drive APIs")]
-    WEB[("Web pages<br/>Wikipedia · search")]
+    SERVER --> SAFE --> PLAN
+    PLAN --> PICK
+    PLAN --> HELP
+    PICK --> SKILLS
 
-    UI --> MW --> Routers
-    CHAT --> INT & AG & Features
-    Features --> LLM --> VX
-    AG --> VX
-    Features --> DB --> FS
-    REN --> GCS
-    GOO --> GAPI
-    KNOW --> WEB
-    Routers --> HLP
+    subgraph GOOGLE["Google Cloud"]
+        GEM[("Gemini AI models")]
+        DB[("Firestore database")]
+        FILES[("Cloud Storage<br/>videos and audio")]
+    end
+
+    PICK --> GEM
+    HELP --> GEM
+    SKILLS --> DB
+    VID --> FILES
+    CAL <--> GCAL[("Your Google Calendar")]
 ```
 
-### 2.2 Layering rules
+**Who does what**
 
-| Layer | Responsibility | Never does |
+| Part | Its job | Under the hood |
 |---|---|---|
-| `router/` | HTTP and SSE framing, user resolution (cookie), card emission | business logic |
-| `features/` | pipelines: plan, reel, notes, review, ingest | HTTP concerns |
-| `features/llm.py` | the **only** module that calls Gemini (plus `knowledge.embed` via its client) | persistence |
-| `database/` | the **only** module that touches Firestore and Cloud Storage | model calls |
-| `helper/prompts.yml` | every prompt, versioned in one file (optional Firestore overrides) | — |
+| Recal website | Chat, video player, week view, practice room | `frontend/src/` |
+| Safety check | Blocks harmful requests and attempts to trick Recal | `helper/guardrails.py` |
+| Request planner | Turns your sentence into a list of steps | `features/intents.py` |
+| Model picker | Chooses the right Gemini model, checks the answer, retries with Pro | `features/llm.py` |
+| Chat assistant | Handles small talk and open questions using tools | `agents/` |
+| Knowledge library | Finds, reads and remembers sources | `features/knowledge.py`, `database/` |
+| Video maker | Writes, narrates and renders 60-second videos | `features/motion.py`, `render.py` |
+| Study planner | Finds free time and books sessions | `features/calendar.py` |
+| Study book writer | Writes multi-page notes and has them reviewed | `features/material.py` |
+| AI client | Reviews decks and runs mock meetings | `features/documents.py`, `meeting.py`, `rehearse.py` |
+| Style memory | Remembers how you like to be taught | `features/memory.py` |
+
+Two rules keep the code tidy:
+- Only the **model picker** talks to Gemini.
+- Only the **database** layer talks to Firestore and Cloud Storage.
+
+Every AI instruction lives in one file, `helper/prompts.yml`, so prompts can be reviewed in
+one place.
 
 ---
 
-## 3. Request lifecycle: one chat door
+## 4. What happens when you send a message
 
-### 3.1 Sequence
+Everything starts in the chat box. There is just one entrance, and Recal works out what you want.
+
+**The story:**
+
+1. You send a message.
+2. Two things happen **at the same time**: the safety check reads it, and the request
+   planner splits it into steps. Running them together means safety adds no waiting time.
+3. Each step runs its skill, such as booking time, making a video or writing notes.
+4. Results stream back **live**: you see progress lines ("Reading kafka.apache.org…"), then
+   the text, then the cards.
+5. Everything is saved, so the chat is still there after a refresh.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor L as Learner
-    participant UI as React UI
-    participant MW as Middleware
-    participant CR as chat_router
-    participant GR as guardrails.check_input
-    participant PL as intents.plan_steps
-    participant H as step handler
-    participant MEM as memory
-    participant FS as Firestore
+    actor You
+    participant App as Recal website
+    participant Srv as Recal server
+    participant Safe as Safety check
+    participant Plan as Request planner
+    participant Skill as Skill (video, plan, notes...)
+    participant DB as Database
 
-    L->>UI: types a message
-    UI->>MW: POST /api/chat {message}
-    MW->>MW: rate limit (30 POST/min per user)
-    MW->>CR: forward
-    CR->>MEM: append user message
-    CR->>CR: sync Google Calendar mirror (60 s TTL)
-    par guard and planner run concurrently
-        CR->>GR: lite-tier safety verdict
-        CR->>PL: lite-tier decomposition (temp 0)
+    You->>App: "Plan 2 hours tomorrow evening for Kafka and prep notes"
+    App->>Srv: send message
+    Srv->>DB: save your message
+    par at the same time
+        Srv->>Safe: is this safe?
+        Srv->>Plan: what are the steps?
     end
-    alt blocked
-        GR-->>CR: {allow:false, category}
-        CR-->>UI: token (fixed refusal text) + receipt
-    else allowed
-        PL-->>CR: steps [{action, topic, hours?, prefer?, on_date?}]
-        loop each step (max 5)
-            CR->>H: handle(step)
-            H-->>CR: status / token / card events
-            CR-->>UI: SSE stream
-            CR->>MEM: save cards
-        end
+    Safe-->>Srv: yes, safe
+    Plan-->>Srv: 1. book 2 hours (evening)  2. write notes on Kafka
+    loop for each step
+        Srv->>Skill: run the step
+        Skill-->>App: live progress, text and a card
+        Skill->>DB: save results
     end
-    CR->>MEM: append assistant message + receipt
-    MEM->>FS: write-through
-    CR-->>UI: state {week, graph, connections, mock}
-    CR-->>UI: done
+    Srv-->>App: refreshed week and library counts
+    Srv-->>App: done
 ```
 
-### 3.2 Planner actions
+If the safety check says no, nothing runs: you get a fixed, polite refusal instead.
 
-`intents.plan_steps` returns up to 5 ordered steps. Each `action` maps to one pipeline:
+### The seven kinds of request
 
-| action | Pipeline | Card |
+The request planner sorts every step into one of these:
+
+| You say something like… | Step | What you get |
 |---|---|---|
-| `plan` | `calendar.plan`: decompose + place into free slots | `plan` |
-| `reschedule` | `calendar.edit_by_request`: verified edits | `calendar_diff` |
-| `reel` | `motion.make_reel` (+ auto source acquisition) | `source`*, `reel` |
-| `material` | `material.draft_material` → `review_and_revise` | `source`*, `page` |
-| `answer` | `knowledge.ask` → grounded stream, or Google-Search-grounded stream | — |
-| `ingest` | `knowledge.ingest_url` | `source` |
-| `chat` | ADK concierge (`agents/workflow.run_freeform`) | — |
+| "Plan 4 hours this week for LangGraph" | **plan** | sessions booked into free slots + a plan card |
+| "Move tomorrow's session to 7pm" | **reschedule** | sessions moved + a changes card |
+| "Show BM25 vs embeddings as a 1 min visual" | **video** | a narrated video (+ source cards if it had to search) |
+| "Write me notes on hybrid retrieval" | **notes** | a multi-page study book |
+| "How does hybrid retrieval work?" | **answer** | an answer citing your sources (or a live Google search) |
+| a link: `https://…` | **read** | the page is read into your library |
+| anything else ("hi, what can you do?") | **chat** | an answer from the chat assistant |
 
-A compound turn such as *"plan 2 hours tomorrow evening and prep notes"* becomes
-`plan → material`. The material is sized to the booked minutes (about one page per 15 minutes).
+A single message can contain several steps. *"Plan 2 hours tomorrow evening and prep notes"*
+becomes **plan → notes**, and the study book is sized to the booked time (about one page per
+15 minutes).
 
-### 3.3 Direct actions (buttons, no planner)
+### The quick-action buttons
 
-`POST /api/chat {action: {type, ...}}`
+Some buttons skip the planner because the action is already clear:
 
-| type | Effect |
+| Button | What happens |
 |---|---|
-| `bootstrap` | returns full state + history (page load) |
-| `reset` | clears chat, cards and Recal sessions for the user |
-| `mark_status` | marks a session done or missed; if pages remain, offers a follow-up session |
-| `urgent` | inserts urgent work, then runs `replan` |
-| `replan` / `energy` | renegotiates the week (`energy=tired` lightens it) |
-| `export` | exports a card to a new Google Doc |
+| **Urgent meeting** | adds a work block tomorrow and re-plans your week around it |
+| **I'm tired** | lightens the week by moving or shrinking sessions |
+| **Mark done / missed** | updates a session; if a study book still has unread pages, offers a follow-up session |
+| **Export → Docs** | turns a card into a new Google Doc |
+| **Reset** | clears your chat, cards and Recal's sessions |
 
-### 3.4 SSE event protocol
+### What "live updates" look like
 
-Events are ordered `(status | token | card)* → receipt* → state? → done`:
+The server streams small messages while it works. The website listens for six kinds:
 
-| event | payload |
+| Message | Shown as |
 |---|---|
-| `status` | `{text}`: progress line ("Reading https://…") |
-| `token` | `{delta}`: streamed prose |
-| `card` | `Card {id, type, title, payload, receipt}` |
-| `receipt` | `{model, thinking, verified, escalated, ms, reason}` |
-| `state` | `{week, graph, connections, mock, history?}` |
-| `error` | `{message, recoverable: true}`; the stream still ends with `done` |
-| `done` | `{}` |
+| progress | grey lines such as "Reading https://…" |
+| text | the reply appearing word by word |
+| card | a result card (video, plan, notes…) |
+| receipt | "gemini-3.8-flash · verified ✓" under a card |
+| state | your week and library refresh |
+| done / error | the turn is finished (errors still end cleanly) |
 
-Every SSE payload passes through `guardrails.redact` before it leaves the server.
+> **Under the hood:** `POST /api/chat` returns a Server-Sent Events stream
+> (`router/chat_router.py`). Every message passes through secret redaction before it leaves
+> the server.
 
 ---
 
-## 4. The Switchboard: model routing and verification
+## 5. How Recal picks a model and checks its work
 
-`llm.route(kind, prompt, verifier, mock_output)` is the single entry point for structured
-model work. It **never raises**: callers always get either verified output or their own
-deterministic fallback.
+Not every job needs the biggest model. Recal uses three sizes of Gemini, like a team with a
+receptionist, a generalist and a senior expert:
 
-### 4.1 Tier selection
-
-| kind | tier / thinking | kind | tier / thinking |
+| Tier | Model | Good at | Used for |
 |---|---|---|---|
-| `intent` | lite / minimal | `plan`, `replan`, `session_edit` | deep / high |
-| `guard` | lite / minimal | `reel_visual_script` | deep / high |
-| `style` | lite / minimal | `reel_focus`, `reel_scene_json` | fast / low |
-| `chat`, `ask`, `page` | fast / low | `draft_review` | fast / high |
-| `doc_review`, `model_knowledge` | fast / low | anything else | fast / low |
+| **Lite** | `gemini-3.5-flash-lite`, temperature 0 | instant, consistent decisions | the safety check, splitting your message into steps, tagging styles |
+| **Fast** | `gemini-3.8-flash` | quick, solid everyday work | chat, video scripts, study pages, deck reviews |
+| **Pro** | `gemini-3.1-pro-preview` | careful reasoning | planning your schedule, directing the video's visuals, second attempts |
 
-The lite tier runs at **temperature 0**, so the same message always routes the same way.
-Gemini 3.x uses thinking *levels*. Flash and Pro reject `MINIMAL`, so "none" maps to `LOW`
-on those tiers.
+The Lite tier runs at **temperature 0**, which means *no randomness*: the same message is
+always understood the same way.
 
-### 4.2 Execute → verify → escalate
+### Check every answer, retry once with Pro
+
+The model picker doesn't trust an AI answer just because it arrived. It checks it in code,
+and if the check fails it gives Pro one more try, explaining what was wrong. If that also
+fails, it uses Plan B. You always get *something*, and the receipt tells you which path was taken.
 
 ```mermaid
 flowchart TD
-    A["route(kind, prompt, verifier)"] --> M{"Mock mode or<br/>no Vertex client?"}
-    M -- yes --> MO["Return mock_output<br/>receipt: mock-tier"]
-    M -- no --> L{"This kind+domain<br/>escalated ≥ 3 times?"}
-    L -- yes --> D["Start on deep / high<br/>(learned routing)"]
-    L -- no --> T["Start on table tier"]
-    D --> C1["chat_json: JSON mode<br/>+ one repair retry"]
-    T --> C1
-    C1 --> V1{"Call ok and<br/>verifier passes?"}
-    V1 -- yes --> OK(["Output + receipt<br/>verified = true"])
-    V1 -- no --> E["Escalate once: deep / high<br/>prompt + 'failed: reason. Fix it.'"]
-    E --> V2{"Passes now?"}
-    V2 -- yes --> OKE(["Output + receipt<br/>escalated = true"])
-    V2 -- no --> FB(["Caller's deterministic fallback<br/>verified = false + reason"])
+    START(["A skill needs AI help"]) --> MOCK{"Is AI available?"}
+    MOCK -- "no (mock mode)" --> DEMO(["Use the built-in demo answer"])
+    MOCK -- yes --> HIST{"Has this kind of job<br/>failed 3+ times before?"}
+    HIST -- yes --> PRO1["Go straight to Pro"]
+    HIST -- no --> NORMAL["Use the usual tier<br/>(Lite, Fast or Pro)"]
+    PRO1 --> ASK["Ask Gemini"]
+    NORMAL --> ASK
+    ASK --> CHECK{"Does the answer<br/>pass Recal's check?"}
+    CHECK -- yes --> OK(["Use it<br/>receipt: verified ✓"])
+    CHECK -- no --> RETRY["Ask Pro again, explaining<br/>what was wrong"]
+    RETRY --> CHECK2{"Passes now?"}
+    CHECK2 -- yes --> OK2(["Use it<br/>receipt: verified ✓, retried with Pro"])
+    CHECK2 -- no --> PLANB(["Use Plan B<br/>receipt says why"])
 ```
 
-### 4.3 Transport resilience
+Recal also **learns from failures**. If a kind of job keeps failing on a topic, it starts
+with Pro next time.
+
+### When Google is busy
+
+Sometimes Google's servers are overloaded. Recal handles that politely instead of failing:
 
 ```mermaid
 flowchart LR
-    CALL["Gemini call<br/>(90 s server deadline)"] --> R{"Result"}
-    R -- "200" --> DONE(["return"])
-    R -- "429 / 503" --> W["wait 2 s · 4 s · 6 s<br/>up to 3 retries"] --> CALL
-    R -- "504 deadline" --> ONCE{"First attempt?"}
-    ONCE -- yes --> CALL
-    ONCE -- no --> RAISE(["raise → route() escalates<br/>or caller falls back"])
-    R -- "other error" --> RAISE
+    CALL["Ask Gemini<br/>(max 90 seconds)"] --> R{"Reply"}
+    R -- "answer" --> DONE(["Continue"])
+    R -- "busy, try later" --> WAIT["Wait 2, 4, then 6 seconds<br/>and try again (3 times max)"] --> CALL
+    R -- "took too long" --> AGAIN{"First time?"}
+    AGAIN -- yes --> CALL
+    AGAIN -- no --> GIVEUP(["Retry with Pro, or Plan B"])
+    R -- "other error" --> GIVEUP
 ```
 
-Streams retry only **before** the first chunk, so a retry never duplicates text the user
-already saw.
-
-### 4.4 JSON extraction
-
-`extract_json` tries, in order: a whole-text parse, the last fenced ```` ```json ```` block,
-and the last balanced `{…}` object. This lets prompts ask for a short explanation followed
-by JSON (see §5.3) without breaking parsing.
+> **Under the hood:** `llm.route()` does tier selection, the check, the Pro retry and Plan B.
+> `with_retry()` handles HTTP 429/503 (busy) and 504 (deadline). Streaming text is only retried
+> before the first word appears, so you never see a sentence twice.
 
 ---
 
-## 5. Knowledge graph and source acquisition
+## 6. Your knowledge library
 
-### 5.1 Graph model
+Recal doesn't answer from vague memory. It answers from **sources it has read for you**, and
+the knowledge library is where those sources live.
 
-The per-user graph (`database/graph_store.GraphStore` + `features/knowledge.Knowledge`) has:
-
-| Node kind | Fields | Embedded |
-|---|---|---|
-| `Source` | url, title (raw text stored separately in `sources/{id}`) | — |
-| `Chunk` | text, ordinal | ✓ 768-d |
-| `Concept` | label, domain | ✓ 768-d |
-| `Generation` | gen_kind (anchors what an output was grounded in) | — |
-
-| Edge | Meaning |
-|---|---|
-| `Source -HAS_CHUNK-> Chunk` | the page was cut into this passage |
-| `Chunk -MENTIONS-> Concept` | the passage discusses the concept |
-| `Concept -<REL>-> Concept` | extracted triple, e.g. `KAFKA -HAS_API-> PRODUCER_API` |
-| `Generation -GROUNDED_IN-> Chunk` | an answer, reel or page cited this passage |
-
-The in-memory dicts are a write-through cache over Firestore and are loaded lazily per user.
-
-### 5.2 Ingestion
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant P as Pipeline
-    participant K as knowledge
-    participant W as Web page
-    participant G as Gemini
-    participant FS as Firestore
-
-    P->>K: ingest_url(user, url)
-    K->>W: GET (descriptive User-Agent)
-    W-->>K: HTML
-    K->>K: readable text (Wikipedia: extracts API)
-    K->>FS: Source node + sources/{id} raw text (≤ 500 KB)
-    K->>K: chunk text
-    loop each chunk
-        K->>G: embed (gemini-embedding-001, 768-d, normalized)
-        K->>FS: Chunk node + vector + HAS_CHUNK edge
-    end
-    K->>G: route("ask"): extract ≤ 8 concept triples
-    K->>FS: Concept nodes (deduplicated by vector, cosine > 0.86) + edges
-    K-->>P: {title, chunks, concepts}
-```
-
-### 5.3 Finding sources (when the graph has nothing on a topic)
-
-```mermaid
-flowchart TD
-    S(["find_sources(topic)"]) --> G1["Gemini + Google Search grounding<br/>prompt: describe each page, then JSON"]
-    G1 --> G2["Candidates = grounding metadata<br/>(real results) + model-written URLs"]
-    G2 --> G3["Live check in parallel:<br/>follow redirects, drop 4xx/5xx"]
-    G3 --> G4{"Any reachable?"}
-    G4 -- yes --> OUT(["Top 3, ranked:<br/>docs/tutorials > blogs > Wikipedia"])
-    G4 -- no --> W1["Keyless web search<br/>(DuckDuckGo HTML)"]
-    W1 --> W2{"Results?"}
-    W2 -- yes --> OUT
-    W2 -- no --> WK["Wikipedia search<br/>(flagged as fallback)"]
-    WK --> OUT
-    OUT --> ING["Pipeline ingests each URL"]
-    ING --> ANY{"Anything ingested?"}
-    ANY -- no --> MK["Model knowledge source:<br/>≥ 150-word explainer,<br/>titled 'Model knowledge: …'"]
-```
-
-Two details matter here:
-
-- **Why the "describe each page" step.** Vertex only attaches grounding metadata (the real
-  result URLs) to text that makes claims. With a JSON-only reply it attaches none.
-- **Why the live check.** URLs the model writes into its reply can be invented, and
-  checking them stops the chat from showing *"Reading … 404"*.
-
-### 5.4 Retrieval: `relevant_chunks`
-
-- **Real embeddings:** vector KNN over chunks and concepts. A hit is kept if
-  cosine ≥ `REEL_MIN_SIMILARITY` (0.6) **or** it contains at least half the topic's
-  keywords. Concept hits pull in their mentioning chunks.
-- **Hash mode** (mock, or an embedding-quota cooldown): keyword-overlap ranking over all chunks.
-- **Embedding failure:** the system switches to hash mode for 10 minutes (a circuit
-  breaker), so ingestion never goes dark.
-
----
-
-## 6. 60-second visual reels
-
-### 6.1 Pipeline
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant CR as chat_router
-    participant M as motion.make_reel
-    participant K as knowledge
-    participant F as Flash (fast)
-    participant P as Pro (deep)
-    participant T as Gemini TTS
-    participant R as render
-    participant GCS as Cloud Storage
-
-    CR->>M: make_reel(user, topic, request)
-    M->>K: relevant_chunks(topic, k=8)
-    alt nothing relevant
-        M-->>CR: None → find_sources, ingest, retry once
-    end
-    M->>M: extractive_script (deterministic fallback, built first)
-    M->>F: 1 · reel_focus: keep facts that serve the ask
-    M->>P: 2 · reel_visual_script: storyboard beats (archetypes, running example)
-    M->>F: 3 · reel_scene_json: compile beats into scenes
-    M->>M: validate_script (escalation on failure, via route)
-    loop each scene, sequential
-        M->>T: speak(narration)
-        T-->>M: WAV → 16-bit mono 24 kHz PCM
-    end
-    M->>R: save_package + prerender (background MP4)
-    R->>GCS: scene WAVs, reel.mp4, reel.pdf
-    M-->>CR: {scene_script, durations, audio URLs, narration, generation_id}
-```
-
-### 6.2 Validation rules (`motion.validate_script`)
-
-- The script matches the `SceneScript` schema, and each scene's `slots` match its archetype model.
-- Narration is at most **25 words** per scene.
-- Every `grounded_in` is an **existing chunk ID** in the user's graph.
-- Estimated runtime (words / 2.5 + a pad per scene) is at most **60 s**.
-
-If the model fails twice, the **extractive fallback** ships instead, built from source
-sentences. The receipt states why.
-
-### 6.3 Scene archetypes
-
-`title`, `build_diagram`, `compare_two`, `timeline`, `code_reveal`, `counter`, `callout`, `flow`,
-`bar_chart`, `token_attention`, `matrix_heat`, `vector_space`, `cycle`, `keyword_match`.
-
-The storyboard prompt pushes for variety: at least 4 different archetypes, no two
-consecutive scenes alike, concrete labels, and one running example.
-
-### 6.4 Narration fallback chain
+### How the library is organised
 
 ```mermaid
 flowchart LR
-    A["MODEL_TTS<br/>gemini-3.8-flash-tts"] -- "fails" --> B["MODEL_TTS_FALLBACK<br/>flash-lite-tts<br/>(separate quota)"]
-    B -- "fails" --> C["Local voice<br/>pyttsx3 / espeak-ng"]
-    C -- "fails" --> D["Captions only<br/>(silence, correct timing)"]
+    S["Source<br/>a web page or document"] -- "is cut into" --> P["Passages<br/>a few sentences each"]
+    P -- "talk about" --> I["Ideas<br/>e.g. 'Kafka', 'partition'"]
+    I -- "relate to" --> I2["Other ideas<br/>e.g. 'Kafka has a Producer API'"]
+    O["Recal's outputs<br/>videos, notes, answers"] -- "cite" --> P
 ```
 
-Scenes are voiced **sequentially**. A 429 waits 15 s once; a scene that still fails gets
-silence of the right length, so one rate-limited scene doesn't mute the reel.
+Each passage and idea also gets an **embedding**, a list of numbers that captures its meaning.
+That's how Recal finds passages *about* "auto" when you searched for "car".
 
-### 6.5 Rendering
-
-`render` draws frames with Pillow (2× supersampled for the pictorial scenes) and encodes
-H.264/AAC with the ffmpeg binary bundled in `imageio-ffmpeg`, so it needs no GPU and no
-system install. `prerender` starts encoding in the background as soon as the reel exists,
-so *Download MP4* is usually instant. In testing, MP4 took about 20 s and PDF slides about 2 s.
-
----
-
-## 7. Managed study sessions
-
-### 7.1 Planning
+### How a web page becomes knowledge
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CR as chat_router
-    participant C as calendar
-    participant G as Google Calendar mirror
-    participant P as Pro (deep/high)
+    participant Skill as Skill
+    participant Lib as Knowledge library
+    participant Web as Web page
+    participant Gem as Gemini
+    participant DB as Database
 
-    CR->>C: plan(goal, hours=2, prefer="evening", on_date="2026-10-19")
-    C->>G: events for the window (busy blocks)
-    C->>C: free_slots: gaps ≥ 45 min inside the window,<br/>daily study cap MAX_STUDY_MIN_PER_DAY
-    alt no slot in the preferred window
-        C->>C: widen to the whole day + note why
+    Skill->>Lib: please read this page
+    Lib->>Web: download it
+    Web-->>Lib: the page
+    Lib->>Lib: keep only the readable text
+    Lib->>DB: save the source and its full text
+    Lib->>Lib: cut the text into passages
+    loop each passage
+        Lib->>Gem: turn the passage into an embedding
+        Lib->>DB: save the passage
     end
-    C->>P: plan_decompose: subtopics with minutes + why
-    C->>C: place subtopics into slots in order<br/>never exceed the stated hours, never invent a slot
-    C-->>CR: {summary, sessions[]} → plan card + Week refresh
+    Lib->>Gem: list the key ideas and how they relate
+    Lib->>DB: save ideas (merging near-duplicates)
+    Lib-->>Skill: done: title, passages, ideas
 ```
 
-Time windows: morning 07:00–12:00, afternoon 12:00–17:00, evening 17:00–22:30.
+### Finding good sources when the library is empty
 
-### 7.2 Study book (multi-call) with critic
+When you ask about something Recal hasn't read yet, it goes looking. It tries the best option
+first and steps down only when it has to:
 
 ```mermaid
 flowchart TD
-    A["draft_material(topic, minutes)"] --> B{"Relevant chunks?"}
-    B -- no --> SRC["find_sources → ingest → retry"]
-    B -- yes --> O["Outline call: pages sized to<br/>booked time (~1 page / 15 min)"]
-    O --> W["One writer call per page<br/>(concept · code · exercise)"]
-    W --> N["Normalize citations + repair math"]
-    N --> CIT{"Any [chunk_id] cited?"}
-    CIT -- no --> EX["Ship extractive page<br/>(grounded by construction)"]
-    CIT -- yes --> CR["Critic: alignment, grounding,<br/>purity, learner's taste"]
-    CR --> SEV{"Severity"}
-    SEV -- "pass / minor" --> SHIP(["Page card<br/>+ progress tracker 0/N"])
-    SEV -- major --> REV["One revision with the<br/>critic's fixes (pass 2 of 2)"]
-    REV --> SHIP
+    Q(["You ask about a new topic"]) --> G1["1. Google Search via Gemini<br/>pick the 3 best pages"]
+    G1 --> G2["Make sure each page really exists<br/>(drop broken or made-up links)"]
+    G2 --> FOUND{"Found good pages?"}
+    FOUND -- yes --> READ["Read them into your library"]
+    FOUND -- no --> G3["2. Plain web search"]
+    G3 --> F2{"Found pages?"}
+    F2 -- yes --> READ
+    F2 -- no --> G4["3. Wikipedia<br/>(labelled as a fallback)"]
+    G4 --> READ
+    READ --> ANY{"Managed to read anything?"}
+    ANY -- yes --> GO(["Continue with your request"])
+    ANY -- no --> G5["4. Gemini writes what it knows<br/>labelled 'Model knowledge'"]
+    G5 --> GO
 ```
 
-**Progress contract.** The Canvas reports the furthest page reached
-(`POST /api/material/progress`). When a session is marked done with pages left, Recal
-offers to book a follow-up session sized to the remaining pages.
+There are two details here:
+
+- **Why "make sure each page exists":** AI models sometimes invent plausible-looking links.
+  Recal checks every link before reading it, so you never see "Reading … 404".
+- **Labels:** Recal ranks official docs and tutorials above blogs, and Wikipedia last. A
+  "Model knowledge" source is always labelled as such, so you know where a claim came from.
+
+### Finding the right passages
+
+When a skill needs material on a topic, the library returns passages that are **close in
+meaning** (similarity of at least 0.6) **or** contain at least half of the topic's keywords.
+If embeddings are temporarily unavailable, it falls back to keyword matching for 10 minutes
+rather than stopping.
 
 ---
 
-## 8. Renegotiation and session edits
+## 7. Making a 60-second video explainer
+
+**What you see:** you type *"Show BM25 vs embeddings as a 1 min visual"*, watch a few
+progress lines, and a narrated, animated video appears on the Canvas with 6 or 7 scenes, each
+citing a source. You can download it as an MP4 or as PDF slides.
+
+**What happens behind the scenes:** three AI passes, then quality checks, narration and rendering.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor L as Learner
-    participant CR as chat_router
-    participant C as calendar
-    participant P as Pro (deep/high)
+    participant Srv as Recal server
+    participant Vid as Video maker
+    participant Lib as Knowledge library
+    participant Fast as Gemini Fast
+    participant Pro as Gemini Pro
+    participant Voice as Gemini voice
+    participant Ren as Renderer
 
-    alt "Urgent client meeting" button
-        L->>CR: action urgent {title, minutes}
-        CR->>C: add_event(work, tomorrow)
-        CR->>C: replan()
-    else "I'm tired"
-        L->>CR: action energy {level: tired}
-        CR->>C: replan(energy="tired")
-    else free text: "move tomorrow's session to 7pm"
-        L->>CR: message → planner: reschedule
-        CR->>C: edit_by_request(request)
+    Srv->>Vid: make a video about "BM25 vs embeddings"
+    Vid->>Lib: passages about this topic?
+    alt library has nothing yet
+        Vid-->>Srv: need sources first: search, read, try again
     end
-    C->>C: list free slots (with slot IDs) + overdue + upcoming sessions
-    C->>P: propose moves {event_id, action, to_slot_id | start}
-    C->>C: VERIFY: only known event IDs, only returned slot IDs,<br/>moves land inside real free windows
-    alt verification fails twice
-        C-->>CR: ask one clarifying question, change nothing
-    else verified
-        C->>C: apply move / shrink / drop (drop = marked missed, never deleted silently)
-        C-->>CR: calendar_diff card {narrative, moves}
+    Vid->>Vid: prepare a simple backup video from the passages (Plan B)
+    Vid->>Fast: 1. pick the facts that answer YOUR question
+    Vid->>Pro: 2. direct the visuals: a storyboard, one running example
+    Vid->>Fast: 3. turn the storyboard into exact scenes
+    Vid->>Vid: check the scenes (retry with Pro if needed)
+    loop each scene, one at a time
+        Vid->>Voice: read the narration aloud
     end
+    Vid->>Ren: start rendering the MP4 in the background
+    Vid-->>Srv: video card (scenes, audio, sources)
 ```
 
-Google Calendar events are read-only mirrors: Recal only ever edits its own sessions.
+### Quality checks every video must pass
+
+- Every scene **cites a real passage** from your library.
+- Each scene's narration is **25 words or fewer**.
+- The whole video runs **60 seconds or less**.
+- Each scene's layout has the fields it needs, for example a chart has its bars.
+
+If the AI fails these twice, Recal ships the **backup video** built directly from source
+sentences, and the receipt says so.
+
+### Scene types
+
+The storyboard picks from 14 visual layouts and aims for variety (at least 4 different types,
+never the same type twice in a row):
+
+| Layout | Good for | Layout | Good for |
+|---|---|---|---|
+| title | the opening hook | flow | a process or protocol, step by step |
+| build_diagram | a system being assembled | cycle | loops and feedback |
+| compare_two | X vs Y side by side | timeline | how something changes over time |
+| keyword_match | exact-word search, highlighted | counter | a number that grows |
+| bar_chart | comparing quantities | code_reveal | code appearing line by line |
+| vector_space | meaning as points in space | token_attention | how an AI model focuses on words |
+| matrix_heat | grids of scores | callout | one key takeaway |
+
+### The narrator's Plan B
+
+```mermaid
+flowchart LR
+    A["Gemini voice<br/>(main)"] -- "unavailable" --> B["Gemini voice<br/>(backup model)"]
+    B -- "unavailable" --> C["Computer's built-in voice"]
+    C -- "unavailable" --> D["Captions only,<br/>timed correctly"]
+```
+
+The narrator speaks only the scene text. The delivery style ("clear, friendly teaching voice")
+is sent separately, so it's never read aloud. Scenes are voiced one at a time, so a busy moment
+silences at most one scene, never the whole video.
+
+### Turning scenes into a video
+
+The renderer draws every frame in Python (Pillow) and encodes the MP4 with ffmpeg. It needs no
+GPU and no paid service. Rendering starts as soon as the video is made, so the download button
+is usually instant. In testing, an MP4 took about 20 seconds and PDF slides about 2 seconds.
+
+> **Under the hood:** `features/motion.py` (pipeline), `features/reel_engine.py` +
+> `features/render.py` (drawing and encoding), `schemas/reel.py` (scene layouts).
 
 ---
 
-## 9. AI client: document review, mock meeting, rehearsal
+## 8. Planning study time and writing study books
 
-### 9.1 Upload and review
+### Booking study time
+
+**What you see:** *"Plan 2 hours tomorrow evening for Kafka"* → a plan card and new blocks in
+your Week tab.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor L as Learner
-    participant D as documents
-    participant K as knowledge
-    participant G as Gemini (fast)
+    participant Srv as Recal server
+    participant Plan as Study planner
+    participant Cal as Your calendar
+    participant Pro as Gemini Pro
 
-    L->>D: POST /api/docs (PPTX / DOCX / XLSX ≤ 15 MB)
-    D->>D: parse into sections (slides, headings, sheets)
-    D->>K: feed text into the knowledge graph
-    L->>D: POST /api/docs/{id}/review {mode}
-    D->>D: heuristic findings in code<br/>(jargon, walls of text, numbers without units, cryptic headers)
-    D->>G: route("doc_review"): findings as hints, model deepens them
-    alt model output malformed
-        D-->>L: heuristic review (still useful)
-    else verified
-        D-->>L: doc_review card {headline, issues[]}
+    Srv->>Plan: 2 hours, tomorrow, evening, topic Kafka
+    Plan->>Cal: what's already booked tomorrow?
+    Plan->>Plan: find free gaps of 45+ minutes in the evening
+    alt no free evening time
+        Plan->>Plan: look at the rest of the day, and say so
+    end
+    Plan->>Pro: split "Kafka" into subtopics with minutes each
+    Plan->>Plan: place subtopics into the free gaps<br/>never more than 2 hours, never an invented slot
+    Plan-->>Srv: plan card + updated week
+```
+
+The planner keeps a few promises:
+- It never books more time than you asked for.
+- It only uses gaps that really exist on your calendar.
+- It respects a daily study limit (150 minutes by default).
+- It tells you when it couldn't honour your time of day.
+
+Times of day: **morning** 7:00–12:00, **afternoon** 12:00–17:00, **evening** 17:00–22:30.
+
+### Writing a study book
+
+**What you see:** a book of several pages on the Canvas, with explanations, diagrams, tables,
+code and a final practice page. Every claim has a small citation number.
+
+```mermaid
+flowchart TD
+    A(["Write notes on Kafka<br/>(1 hour booked)"]) --> HAS{"Library has<br/>material on it?"}
+    HAS -- no --> FIND["Find and read sources first"] --> HAS
+    HAS -- yes --> OUTLINE["Plan the pages<br/>about 1 page per 15 minutes"]
+    OUTLINE --> WRITE["Write each page separately<br/>(explanation, code, exercise)"]
+    WRITE --> CITE{"Does it cite<br/>your sources?"}
+    CITE -- no --> SAFE(["Plan B: a page built directly<br/>from source sentences"])
+    CITE -- yes --> CRITIC["A second AI, the critic, reviews it:<br/>on topic? backed by sources?<br/>matches your style?"]
+    CRITIC --> VERDICT{"Critic's verdict"}
+    VERDICT -- "good / minor notes" --> SHOW(["Show the book"])
+    VERDICT -- "major problems" --> FIX["Rewrite once using<br/>the critic's fixes"] --> SHOW
+```
+
+### Tracking your progress
+
+As you swipe through the book, Recal remembers the furthest page you reached. When you mark
+the session done and pages are left, it offers to book a follow-up session sized to the rest.
+
+> **Under the hood:** `features/calendar.py` (`free_slots`, `plan`), `features/material.py`
+> (`draft_material`, `review_and_revise`), progress via `POST /api/material/progress`.
+
+---
+
+## 9. When your week changes
+
+Plans break. Recal's job is to re-plan without losing anything.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant Srv as Recal server
+    participant Plan as Study planner
+    participant Pro as Gemini Pro
+
+    alt you press "Urgent meeting"
+        You->>Srv: urgent meeting, 2.5 hours
+        Srv->>Plan: add it to tomorrow, then re-plan
+    else you press "I'm tired"
+        You->>Srv: lighten my week
+        Srv->>Plan: re-plan with low energy
+    else you type "move tomorrow's session to 7pm"
+        You->>Srv: your request
+        Srv->>Plan: apply this change
+    end
+    Plan->>Plan: list free slots, overdue and upcoming sessions
+    Plan->>Pro: suggest moves (using only the listed slots)
+    Plan->>Plan: CHECK: real sessions only, real free time only
+    alt suggestions fail the check twice
+        Plan-->>You: one clarifying question, nothing changed
+    else check passes
+        Plan->>Plan: move, shrink or mark as missed (never silently delete)
+        Plan-->>You: a card listing every change
     end
 ```
 
-Modes: `message` (did the deck land its message?) and `client_ready` (can it go to a client?).
+Recal only ever changes **its own** study sessions. Your Google Calendar events are read-only.
 
-### 9.2 Mock client meeting
+---
+
+## 10. Practising with an AI client
+
+Upload a presentation (PPTX), document (DOCX) or spreadsheet (XLSX) in the **Practice** tab.
+Recal can then do three things with it.
+
+### 1. Review it
+
+**What you see:** a review card that answers either *"Does this deck land its message?"* or
+*"Is it ready for a client?"*, with issues sorted by how urgent they are.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant Rev as Deck reviewer
+    participant Lib as Knowledge library
+    participant Gem as Gemini Fast
+
+    You->>Rev: upload deck (up to 15 MB)
+    Rev->>Rev: split into slides / sections
+    Rev->>Lib: add the text to your library (so videos and answers can cite it)
+    You->>Rev: review it
+    Rev->>Rev: quick checks in code: jargon, walls of text,<br/>numbers without units, vague headings
+    Rev->>Gem: deepen the review, using those findings as hints
+    alt AI answer is unusable
+        Rev-->>You: the code-only review (still useful)
+    else
+        Rev-->>You: review card: headline + issues to fix
+    end
+```
+
+### 2. A mock client meeting
+
+**What you see:** a voice conversation. The client asks about the weak spots in your material,
+you answer out loud, and at the end you get an honest debrief.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Prep: POST /api/meeting/start {doc_id | topic}
-    Prep: Client studies the material<br/>understood vs unclear → agenda
-    Prep --> Asking
-    Asking: Client asks about the next agenda item
-    Asking --> Judging: POST /api/meeting/turn {said}
-    Judging: Did the explanation resolve it?<br/>one gap + one follow-up
-    Judging --> Asking: next question
-    Judging --> Debrief: POST /api/meeting/end
-    Debrief: verdict · strongest moments ·<br/>fixes · what to drill next
+    [*] --> Preparing: you start the meeting
+    Preparing: The client reads your material<br/>and lists what it didn't understand
+    Preparing --> Asking
+    Asking: The client asks about the next unclear point
+    Asking --> Listening: you answer out loud
+    Listening: Did your answer resolve it?<br/>Notes one gap and asks a follow-up
+    Listening --> Asking: next question
+    Listening --> Debrief: you end the meeting
+    Debrief: Verdict, your strongest moments,<br/>what to fix, what to practise
     Debrief --> [*]
 ```
 
-The browser handles the audio: SpeechRecognition for listening and speechSynthesis for the
-client's voice, so a meeting costs zero model audio quota. Every turn goes through the input
-guard. Without a model, a heuristic agenda (unexplained acronyms, numbers without
-baselines) keeps the meeting running.
+Your browser does the listening and speaking (speech recognition and speech synthesis), so a
+meeting doesn't use any AI audio quota. If the AI is unavailable, the client still asks sensible
+questions, for example about unexplained acronyms or numbers with no baseline.
 
-### 9.3 Rehearsal coach
+### 3. Rehearse slide by slide
 
-`POST /api/docs/{id}/coach` (multipart: `section`, `audio`): the learner presents one slide
-aloud. The audio is converted to 16 kHz WAV and sent with the slide text to Gemini, which
-returns `{transcript, feedback, question}`: what landed, the gap versus the slide's claim,
-and one client cross-question. Without a model, Recal asks a canned question built from the
-slide itself.
+Present one slide out loud and Recal listens. Gemini hears your recording together with the
+slide's text, then gives you short feedback (what landed, what the slide claims that you didn't
+back up) and one question a real client might ask next.
+
+> **Under the hood:** `features/documents.py`, `features/meeting.py`, `features/rehearse.py`;
+> endpoints under `/api/docs` and `/api/meeting`.
 
 ---
 
-## 10. Concierge agent (Google ADK)
+## 11. The chat assistant
 
-Messages the planner can't map to a pipeline (small talk, open questions, session tweaks) go
-to an ADK `LlmAgent` built by `agents/agent_factory.AgentFactory`:
+Some messages don't fit a skill: *"hi, what can you do?"*, *"what's on my calendar?"*,
+*"shrink Friday's session"*. These go to the **chat assistant**, an AI agent built with
+**Google's Agent Development Kit (ADK)** that can use three tools:
 
-| Tool | Does |
+| Tool | What it does |
 |---|---|
-| `search_context(question)` | top-5 relevant chunks from the user's graph, wrapped as untrusted data |
-| `read_week()` | this week's sessions and mirrored Google events |
-| `edit_study_session(request)` | `calendar.edit_by_request` with the same verification gate as §8 |
+| search my sources | finds the 5 most relevant passages in your library |
+| read my week | lists this week's sessions and Google events |
+| edit a session | moves, shrinks or deletes one of your sessions, with the same safety checks as §9 |
 
-Tools are **closures over the user ID**, so the model can't address another user's data. The
-instruction (`concierge_instruction` in `prompts.yml`) plus a standing security rule forbids
-following instructions found in tool results. If ADK is unavailable, the same prompt is
-answered by the chat model directly.
+The tools can only see **your** data; they're locked to your account before the agent starts.
+The agent is told never to follow instructions found inside web pages or documents. If the
+agent framework is unavailable, the same instructions go straight to Gemini Fast.
+
+> **Under the hood:** `agents/agent_factory.py` builds the agent, and `agents/workflow.py` runs
+> it with its tools.
 
 ---
 
-## 11. Style memory
+## 12. Learning your teaching style
+
+**What you see:** under every video and study book there are two buttons, **👍 This clicked**
+and **👎 Not for me**. After you click, the button is replaced by what Recal learned, for example:
+
+> 👍 Learned: *Introduce the concept with an everyday analogy, summarise the effect in a
+> comparison table, give a runnable command, and end with a practice exercise.*
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor L as Learner
-    participant M as memory
-    participant G as Gemini
-    participant FS as Firestore
+    actor You
+    participant Mem as Style memory
+    participant Gem as Gemini
+    participant DB as Database
 
-    L->>M: 👍 on a reel or page (generation_id)
-    M->>G: distil the generation's trace into a reusable descriptor<br/>("prefers one running example, code before theory")
-    M->>G: embed descriptor + topic
-    M->>FS: style_memory (dedupe: cosine ≥ 0.9 reinforces instead)
-    Note over M,FS: 👎 stores an "avoid" preference
-    L->>M: later: new reel or notes on a related topic
-    M->>FS: vector KNN over "prefer" styles (cosine ≥ 0.3)
-    M-->>G: injected into the drafter and critic prompts
+    You->>Mem: 👍 (or 👎) on a study book
+    Mem->>Mem: look up that book's content
+    Mem->>Gem: describe HOW it taught, not WHAT it taught
+    Gem-->>Mem: "Start with an analogy, then a table, then..."
+    Mem->>DB: save as "prefer" (👍) or "avoid" (👎)
+    Note over Mem,DB: a near-identical style is strengthened, not duplicated
+    You->>Mem: later: notes on a different topic
+    Mem->>DB: find related styles you liked
+    Mem-->>Gem: "this learner prefers..." added to the writer and critic
 ```
+
+Styles are **topic-free**: a style learned from a Kafka book also shapes your next book on
+Python.
 
 ---
 
-## 12. Google Calendar and Docs integration
+## 13. Connecting Google Calendar and Docs
 
-### 12.1 OAuth (web server flow)
+Click the **Calendar** or **Google Docs** pill at the top of the app. Google asks you to choose
+an account and approve access, and you're sent back to Recal, now connected.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor L as Learner
-    participant UI as React UI
-    participant API as auth_router
-    participant GG as google
-    participant GA as accounts.google.com
-    participant FS as Firestore
+    actor You
+    participant App as Recal website
+    participant Srv as Recal server
+    participant G as Google sign-in
+    participant DB as Database
 
-    L->>UI: click "Calendar" pill
-    UI->>API: GET /api/connect/calendar?return_to=origin
-    API->>GG: auth_url(): state token (10 min), safe return_to
-    API-->>UI: {auth_url}
-    UI->>GA: redirect (scope calendar.readonly, offline access)
-    GA-->>API: GET /api/connect/google/callback?code&state
-    API->>GG: take_pending(state) + exchange code for tokens
-    GG->>FS: connections/google_calendar = seal(tokens) (AES-256-GCM)
-    API->>API: force calendar sync
-    API-->>UI: redirect origin/?connected=calendar
+    You->>App: click "Calendar"
+    App->>Srv: start connecting
+    Srv-->>App: Google's sign-in link (valid 10 minutes)
+    App->>G: you sign in and approve "see your calendar"
+    G-->>Srv: approval code
+    Srv->>G: swap the code for access keys
+    Srv->>DB: save the keys, encrypted
+    Srv->>Srv: copy your next 2 weeks of events
+    Srv-->>App: back to Recal: "Calendar connected"
 ```
 
-| Provider | Scope | Use |
+| Connection | Permission asked | What Recal does with it |
 |---|---|---|
-| `calendar` | `calendar.readonly` | mirror the next 14 days of events (busy and free), synced at most every 60 s |
-| `gdocs` | `drive.file` | create a new Doc from a card; Recal can only see files it created |
+| Calendar | read your calendar | shows your events in the Week tab and plans around busy times (refreshed at most once a minute) |
+| Google Docs | create files | creates a new Doc when you export a card; it can only see files it created itself |
 
-`return_to` is restricted to localhost or `OAUTH_REDIRECT_BASE`, so the callback can't be
-used as an open redirect.
+Your access keys are **encrypted** before they're stored. Disconnecting deletes them and also
+revokes Recal's access on Google's side.
+
+> **Note:** Recal's Google app isn't yet verified by Google, so you'll see *"Google hasn't
+> verified this app"*. Click **Advanced → Go to Recal** to continue.
 
 ---
 
-## 13. Guardrails and security
+## 14. Keeping you safe
+
+Recal has four layers of protection:
 
 ```mermaid
 flowchart TD
-    IN(["User text"]) --> L1{"1 · Input guard<br/>≤ 4000 chars +<br/>lite-model verdict"}
-    L1 -- "harmful / self_harm /<br/>prompt_injection" --> FIX(["Fixed refusal text<br/>(never model-written)"])
-    L1 -- allow --> PIPE["Pipelines"]
-    SRC(["Web pages · uploads ·<br/>retrieved chunks"]) --> L2["2 · Untrusted-data wrapping<br/>&lt;untrusted_data&gt; + standing rule"]
-    L2 --> PIPE
-    PIPE --> L3["3 · Output redaction<br/>configured secrets + key/token shapes"]
-    L3 --> OUT(["SSE · API JSON · logs"])
-    REQ(["POST /api/chat · docs ·<br/>meeting · reels"]) --> L4{"4 · Rate limiter<br/>30/min per user"}
-    L4 -- over --> R429(["429 + Retry-After"])
+    MSG(["Your message"]) --> L1{"1. Safety check<br/>Is it harmful, or trying<br/>to trick Recal?"}
+    L1 -- yes --> NO(["A fixed, polite refusal<br/>(never AI-written)"])
+    L1 -- no --> WORK["Recal does the work"]
+    OUT(["Web pages, uploads,<br/>search results"]) --> L2["2. Marked as 'untrusted'<br/>Recal reads them as information,<br/>never as instructions"]
+    L2 --> WORK
+    WORK --> L3["3. Secret scrubbing<br/>keys and tokens are removed<br/>from every reply and log"]
+    L3 --> YOU(["What you see"])
+    MANY(["Too many requests"]) --> L4{"4. Rate limit<br/>30 per minute"}
+    L4 -- over --> SLOW(["Please slow down"])
 ```
 
-| Concern | Control |
+What each layer guards against:
+
+| Risk | How Recal handles it |
 |---|---|
-| Credentials | none on the server: Vertex, Firestore, GCS and Secret Manager use the VM's service account (ADC) |
-| Secrets at rest | OAuth tokens sealed with Cloud KMS or AES-256-GCM (`RECAL_ENCRYPTION_KEY`); weaker seals are upgraded on read |
-| Database access | Firestore rules deny all client access; only the backend reads or writes |
-| Prompt injection | outside text is tagged as untrusted, and agent tools are scoped to the calling user |
-| Guard outage | fails **open** (logged), so a model outage never locks a learner out |
-| Logs | redacted formatter; on the VM no logs are written to disk at all |
+| Harmful requests | blocked by the Lite-model safety check; self-harm gets a supportive message |
+| A web page saying "ignore your instructions…" | outside text is wrapped and labelled as data only |
+| Leaking keys | none are stored in the app: it signs in to Google Cloud as its own service account |
+| Stolen database | Google sign-in keys are encrypted (AES-256-GCM); browsers can't access the database at all |
+| Safety-check outage | Recal lets messages through (and logs it) rather than locking everyone out |
+| Server logs | secrets are scrubbed, and the live server writes no logs to disk |
+
+> **Under the hood:** `helper/guardrails.py` (all four layers), `database/fire.py` (encryption).
 
 ---
 
-## 14. Data model
+## 15. Where your data lives
 
-### 14.1 Firestore layout (schema v2, `database/schema.py`)
+Everything is stored per user in **Firestore** (Google's cloud database). Videos and audio go to
+**Cloud Storage**.
 
 ```mermaid
 erDiagram
-    USER ||--o{ CONVERSATION : has
-    CONVERSATION ||--o{ MESSAGE : contains
-    USER ||--o{ CARD : has
-    USER ||--o{ EVENT : schedules
-    USER ||--o{ PROGRESS : tracks
-    USER ||--o{ DOC : uploads
-    DOC ||--o{ SECTION : "parsed into"
-    USER ||--o{ NODE : "knowledge graph"
-    USER ||--o{ EDGE : "knowledge graph"
-    USER ||--o{ SOURCE_TEXT : "raw page text"
-    USER ||--o{ GENERATION : produced
-    USER ||--o{ STYLE_MEMORY : learned
-    USER ||--o{ CONNECTION : "OAuth (sealed)"
-    REEL }o--|| USER : "owned by"
+    USER ||--o{ CHAT : has
+    CHAT ||--o{ MESSAGE : contains
+    USER ||--o{ CARD : "has results"
+    USER ||--o{ SESSION : "has study sessions"
+    USER ||--o{ BOOK_PROGRESS : tracks
+    USER ||--o{ UPLOAD : "has uploaded"
+    UPLOAD ||--o{ SECTION : "is split into"
+    USER ||--o{ LIBRARY_ITEM : "knowledge library"
+    USER ||--o{ LIBRARY_LINK : "knowledge library"
+    USER ||--o{ LEARNED_STYLE : "has learned"
+    USER ||--o{ GOOGLE_LINK : "has connected"
+    VIDEO }o--|| USER : "belongs to"
 
-    NODE {
-        string kind "Concept | Chunk | Source | Generation"
-        vector embedding "768-d, vector-indexed"
-        string label_or_text
+    LIBRARY_ITEM {
+        string kind "source, passage, idea or output"
+        vector meaning "768 numbers, searchable"
+        string text_or_label
     }
-    EDGE {
+    LIBRARY_LINK {
         string from
-        string rel "HAS_CHUNK | MENTIONS | GROUNDED_IN | triple"
+        string relation "has passage, mentions, cites..."
         string to
-        float confidence
     }
-    EVENT {
+    SESSION {
         datetime start
         datetime end
-        string kind "study | review | work"
-        string status "planned | done | missed"
-        string topic
+        string kind "study, review or work"
+        string status "planned, done or missed"
     }
-    STYLE_MEMORY {
-        string descriptor
-        string polarity "prefer | avoid"
-        vector embedding
-        int reinforced
+    LEARNED_STYLE {
+        string description
+        string type "prefer or avoid"
+        vector meaning
     }
 ```
 
-| Path | Contents |
+| What | Where in Firestore |
 |---|---|
-| `users/{uid}/conversations/{conv}/messages/{id}` | chat messages + receipts |
-| `users/{uid}/cards/{id}` | card records |
-| `users/{uid}/events/{id}` | study, review and work events |
-| `users/{uid}/progress/{topic}` | study-book progress `{done, total}` |
-| `users/{uid}/docs/{id}/sections/{n}` | parsed uploads |
-| `users/{uid}/nodes/{id}`, `edges/{id}` | knowledge graph (vector-indexed `embedding`) |
-| `users/{uid}/sources/{node_id}` | raw page text (never bulk-loaded) |
-| `users/{uid}/generations/{id}`, `style_memory/{id}` | pedagogy memory |
-| `users/{uid}/connections/google_{provider}` | sealed OAuth tokens |
-| `reels/{gen_id}` | reel package metadata (`user` = owner) |
-| `config/app` | runtime key/value settings |
+| chats and messages | `users/{you}/conversations/{chat}/messages` |
+| result cards | `users/{you}/cards` |
+| study sessions and work blocks | `users/{you}/events` |
+| study book progress | `users/{you}/progress` |
+| uploaded documents | `users/{you}/docs/{doc}/sections` |
+| knowledge library | `users/{you}/nodes` (sources, passages, ideas) and `users/{you}/edges` (links) |
+| full text of each source | `users/{you}/sources` |
+| learned styles | `users/{you}/style_memory`, plus `users/{you}/generations` |
+| Google connections (encrypted) | `users/{you}/connections` |
+| videos | `reels/{video}` (owner recorded on each) |
 
-**Vector indexes** (cosine, flat, 768-d): `nodes (kind ASC, embedding)` and
-`style_memory (polarity ASC, embedding)`.
-
-### 14.2 Cloud Storage layout
-
-`users/{uid}/reels/{gen_id}/scene{n}.wav · reel.mp4 · reel.pdf`. Downloads use V4 signed
-URLs; when the credentials can't sign, the server proxies the bytes instead.
+Two **search indexes** let Recal find things by meaning: one over library passages and ideas,
+and one over learned styles. In Cloud Storage, each video's files (`scene0.wav`…, `reel.mp4`,
+`reel.pdf`) live under `users/{you}/reels/{video}/`. Downloads use short-lived private links.
 
 ---
 
-## 15. Resilience and graceful degradation
+## 16. When something goes wrong: Plan B
 
-| Failure | What the learner gets |
+Recal is built so that a failure makes the result a bit simpler, never a crash. This table is
+the full list:
+
+| If this fails… | …you still get |
 |---|---|
-| No Google Cloud configured | **mock mode**: every feature works with canned output |
-| Model returns invalid JSON | one repair retry, then escalation to Pro, then the deterministic fallback |
-| 429 / 503 from Vertex | automatic retry with backoff (2/4/6 s) |
-| Call stalls | 90 s deadline → 504 → one retry → fallback |
-| Google Search grounding finds nothing | web search → Wikipedia → model-knowledge source |
-| Embedding quota exhausted | hash vectors + keyword retrieval for 10 min |
-| TTS rate-limited | fallback TTS model → local voice → captions with correct timing |
-| Reel script fails validation twice | extractive reel built from source sentences |
-| Notes without citations | extractive grounded page |
-| Planner model down | the whole message goes to the concierge agent |
-| ADK unavailable | concierge prompt answered by the chat model directly |
-| Guard model down | fails open (logged) |
-| Firestore unreachable | in-memory working set for the session |
+| Google Cloud isn't set up | **mock mode**: every feature works with demo content |
+| the AI gives a malformed answer | one fix-up attempt, then a retry with Pro, then Plan B |
+| Google is busy (overloaded) | automatic waiting and retrying (2, 4, 6 seconds) |
+| a request hangs | it's stopped after 90 seconds and tried once more |
+| Google Search finds nothing | web search → Wikipedia → Gemini's own knowledge (labelled) |
+| embeddings are unavailable | keyword search for 10 minutes |
+| the voice is unavailable | backup voice → built-in voice → captions |
+| a video script fails its checks twice | a simple video built from source sentences |
+| study notes come back without citations | a page built directly from your sources |
+| the request planner is down | your message goes to the chat assistant |
+| the agent framework is down | Gemini answers directly |
+| the safety check is down | messages are allowed through (and logged) |
+| the database is unreachable | your session continues in memory |
 
 ---
 
-## 16. API reference
+## 17. Running on Google Cloud
 
-| Method | Path | Body / query | Returns |
-|---|---|---|---|
-| POST | `/api/chat` | `{message}` or `{action:{type,…}}` | SSE stream (§3.4) |
-| GET | `/api/conversations` | — | `{conversations:[{id,title,ts}]}` |
-| POST | `/api/conversations` | — | `{id}` new conversation |
-| POST | `/api/auth` | `{guest:true}` or `{id_token}` | `{ok,user}` + `recal_user` cookie |
-| GET | `/api/connect/calendar` | `?return_to=` | `{auth_url}` |
-| POST | `/api/connect/notebook` | `{return_to}` | `{auth_url}` (Google Docs) |
-| GET | `/api/connect/google/callback` | `code, state` | redirect back to the app |
-| GET | `/api/connect/google` | — | connection status + sync result |
-| DELETE | `/api/connect/calendar` · `/api/connect/gdocs` | — | disconnect (revoke + delete tokens) |
-| GET | `/api/docs` | — | uploaded documents |
-| POST | `/api/docs` | multipart `file` | `{doc:{id,name,kind,sections}}` |
-| GET | `/api/docs/{id}` | — | parsed sections |
-| POST | `/api/docs/{id}/review` | `{mode:"message"\|"client_ready"}` | `doc_review` card |
-| POST | `/api/docs/{id}/coach` | multipart `section`, `audio?` | `{transcript,feedback,question}` |
-| DELETE | `/api/docs/{id}/coach` | — | reset rehearsal |
-| POST | `/api/meeting/start` | `{doc_id?, topic?}` | client's opening line |
-| POST | `/api/meeting/turn` | `{said}` | `{say, gap}` |
-| POST | `/api/meeting/end` | — | `{summary}` debrief |
-| POST | `/api/reels/{gen_id}/render` | `{format:"mp4"\|"pdf"}` | `{url, seconds, bytes}` |
-| GET | `/api/reels/{gen_id}/files/{name}` | `?inline=1` | WAV / MP4 / PDF |
-| POST | `/api/feedback` | `{generation_id, signal:"up"\|"down", note?}` | `{style_descriptor}` |
-| POST · GET | `/api/material/progress` | `{topic,page,total}` · `?topic=` | progress state |
-| GET | `/api/settings/llm` | — | read-only model configuration |
-| GET | `/api/health` | `?live=1` | config, problems, per-feature status, live pings |
-
-The user is resolved from the `recal_user` cookie, and the conversation from `recal_conv`.
-
----
-
-## 17. Configuration reference
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `GOOGLE_CLOUD_PROJECT` | — | enables Vertex AI + Firestore (unset = mock mode) |
-| `GOOGLE_CLOUD_LOCATION` | `global` | Vertex location (Gemini 3.x Pro/TTS are global-only) |
-| `GOOGLE_CLOUD_API_KEY` | — | optional Vertex API key (Gemini only; blank = service account) |
-| `MOCK` | — | `1` forces canned output |
-| `MODEL_LITE` / `MODEL_FAST` / `MODEL_DEEP` | 3.5-flash-lite / 3.8-flash / 3.1-pro-preview | model tiers |
-| `MODEL_EMBED` | `gemini-embedding-001` | embeddings (768-d) |
-| `MODEL_TTS` / `MODEL_TTS_FALLBACK` | 3.8-flash-tts / 3.8-flash-lite-tts | narration |
-| `TTS_VOICE` | `Kore` | prebuilt Gemini voice |
-| `TTS_STYLE` | `clear, friendly teaching voice` | delivery style, sent as speech metadata (never spoken) |
-| `LOCAL_TTS` | `1` | offline voice fallback |
-| `LLM_TIMEOUT_S` | `90` | per-call Gemini deadline |
-| `REEL_MIN_SIMILARITY` | `0.6` | cosine floor for "on-topic" chunks |
-| `MAX_STUDY_MIN_PER_DAY` | `150` | daily study cap used by the planner |
-| `RECAL_MEDIA_BUCKET` | — | Cloud Storage bucket for media |
-| `RECAL_ENCRYPTION_KEY` | — | 32-byte base64 key for AES-256-GCM token sealing |
-| `RECAL_KMS_KEY` | — | Cloud KMS key (takes precedence over AES) |
-| `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | — | OAuth web client |
-| `OAUTH_REDIRECT_BASE` | `http://localhost:8000` | public base URL for the OAuth callback |
-| `SESSION_SECRET` | `change-me` | session secret |
-| `GUARD_ENABLED` / `GUARD_MAX_CHARS` | `1` / `4000` | input guard |
-| `RATE_LIMIT_PER_MIN` | `30` | per-user POST limit (`0` = off) |
-| `LOG_LEVEL` / `LOG_TO_FILE` / `LOG_DIR` | `INFO` / `1` / `logs/` | logging (`LOG_TO_FILE=0` on the VM) |
-| `PROMPTS_FROM_DB` | — | `1` = prompt overrides from Firestore `prompts/{name}` |
-| `HTTP_USER_AGENT` | `RecalBot/0.2 (+repo URL)` | outbound fetches (Wikipedia policy) |
-| `RENDER_SSAA` | `2` | supersampling for reel frames |
-
----
-
-## 18. Frontend
-
-React 19 + Vite, served by the backend from `frontend/dist`, from the same origin as `/api`.
-
-| View | Shows |
-|---|---|
-| Chat (left) | the conversation, live status lines, receipts; quick actions (*Ingest a doc · Explain visually · Plan 4 hours · Urgent meeting · Write me notes · Ask a doubt · I'm tired*) |
-| **Canvas** | reels (`ReelPlayer`, MP4/PDF downloads) and study books (`MaterialSlides`, page-by-page with progress) |
-| **Week** | `WeekView`: Recal sessions + Google events, mark done or missed |
-| **Cards** | every card: plans, diffs, sources, reviews; export to Google Docs |
-| **Practice** | `PracticeView`: upload, review, rehearsal coach, `MeetingView` voice meeting |
-
-Rendering helpers: `Markdown` (GFM + KaTeX math) and `Mermaid` (diagrams inside study pages).
-`lib/stream.js` parses the SSE protocol.
-
----
-
-## 19. Deployment architecture
+The live demo runs on **one small Google Cloud server**:
 
 ```mermaid
 flowchart LR
-    J(["Judges / users"]) -->|"HTTPS :443"| CAD
-    subgraph VM["Compute Engine VM · Ubuntu 24.04 · e2-small + 2 GB swap"]
-        CAD["Caddy<br/>Let's Encrypt TLS<br/>SSE flush, 50 MB uploads"] -->|"127.0.0.1:8000"| UV["uvicorn (nohup)<br/>FastAPI + frontend/dist"]
-        CRON["@reboot cron"] -.-> UV
+    USERS(["Judges and users"]) -->|"secure HTTPS"| WEB
+    subgraph SERVER["Google Cloud server (Ubuntu, 2 GB memory)"]
+        WEB["Caddy web server<br/>free HTTPS certificate"] --> APP["Recal server<br/>+ the website"]
+        BOOT["Restarts automatically<br/>after a reboot"] -.-> APP
     end
-    UV -->|"service account (ADC)"| VX[("Vertex AI · global")]
-    UV --> FS[("Firestore (default)")]
-    UV --> GCS[("Cloud Storage<br/>media bucket")]
-    SM[("Secret Manager<br/>recal-env")] -.->|"pulled by vm_install.sh"| UV
-    UV --> GAPI[("Calendar / Docs APIs")]
+    APP -->|"signs in as its own<br/>service account"| GEM[("Gemini models")]
+    APP --> DB[("Firestore database")]
+    APP --> FILES[("Cloud Storage")]
+    SEC[("Secret Manager<br/>passwords and keys")] -.->|"loaded when installing"| APP
+    APP --> GAPI[("Google Calendar and Docs")]
 ```
 
-- `deploy/vm_install.sh` is idempotent. Each run:
-  - adds swap and installs the packages;
-  - pulls `.env` from Secret Manager;
-  - builds the frontend, then deletes `node_modules` to save disk;
-  - (re)starts the backend with `deploy/start.sh` and configures Caddy;
-  - prints the URL.
-- **No logs on disk:** app output goes to `/dev/null`, `LOG_TO_FILE=0`, and journald is
-  RAM-only (16 MB cap).
-- **Redeploy:** `git pull && bash deploy/vm_install.sh`. **Debug:** `bash deploy/start.sh fg`.
+- **One command installs or updates everything:** `bash deploy/vm_install.sh`. It:
+  1. sets up the server and adds swap memory;
+  2. loads the settings from Secret Manager;
+  3. builds the website;
+  4. starts Recal in the background;
+  5. turns on HTTPS;
+  6. prints the public link.
+- **To update after a code change:** `git pull && bash deploy/vm_install.sh`.
+- **To watch what's happening:** `bash deploy/start.sh fg` shows live logs on screen.
+  Nothing is saved to disk.
 
-The full step-by-step guide is in [deploy/README.md](../deploy/README.md).
-
----
-
-## 20. Testing and observability
-
-- **`GET /api/health`** returns config, a problems list and a per-feature status (`real`, `mock`,
-  `setup` or `broken`) with a note. **`?live=1`** makes one real call each to the lite, fast and
-  deep models, embeddings, TTS and web search.
-- **Receipts** on every output show the model, thinking level, `verified`, `escalated` and the
-  reason, so they're visible in the UI log.
-- **End-to-end API suite** (run against real Gemini; it uses its own test user and resets it):
-
-| Check | Result |
-|---|---|
-| health, frontend, privacy page | ✅ |
-| concierge chat | ✅ |
-| plan study time | ✅ |
-| reel (6 scenes, Gemini TTS, real web sources) | ✅ |
-| reel → PDF / MP4 | ✅ ~2 s / ~20 s |
-| grounded Q&A | ✅ ~7 s |
-| study notes (multi-page + critic) | ✅ |
-| doc upload + review | ✅ |
-| mock meeting start / turn / end | ✅ |
-| reset | ✅ |
-
-**16/16 passed.**
+The step-by-step setup (Google Cloud project, permissions, database, sign-in) is in the
+[deployment guide](../deploy/README.md).
 
 ---
 
-## 21. Limitations and roadmap
+## 18. How we test it
 
-| Limitation | Next step |
+**Health check.** Open `/api/health` to see which features are ready. Add `?live=1` and Recal
+makes one tiny real call to each model (Lite, Fast, Pro), to embeddings, to the voice and to
+web search, then reports what works.
+
+**Receipts.** Every result shows which model made it and whether it passed its checks, so
+problems are visible in the app itself.
+
+**End-to-end test.** A script sends real requests through the API as a separate test user, then
+cleans up after itself. On the last full run, against real Gemini, it passed **16 of 16**:
+
+| Test | Result | Typical time |
+|---|---|---|
+| health, website, privacy page | ✅ | instant |
+| chat assistant | ✅ | ~15 s |
+| plan study time | ✅ | ~8 s for the booking |
+| make a video (with real web sources and Gemini voice) | ✅ | 2–3 min |
+| download video as PDF / MP4 | ✅ | ~2 s / ~20 s |
+| answer a question from the library | ✅ | ~7 s |
+| write a study book (with critic) | ✅ | ~3 min |
+| upload + review a deck | ✅ | ~10 s |
+| mock meeting: start, answer, debrief | ✅ | seconds each |
+
+---
+
+## 19. What's next
+
+| Today | Next step |
 |---|---|
-| Guests share one `demo` profile | issue a per-browser `g_<uuid>`; verify Google ID tokens (or Firebase Auth) for sign-in |
-| Single process holds OAuth state + graph cache | move OAuth state to Firestore; run on Cloud Run with min instances |
-| OAuth app unverified (100-user cap, warning screen) | domain verification + Google OAuth review |
-| Reels are 2–3 min end to end on a cold topic | cache sources per topic; stream scenes as they're narrated |
-| Calendar is read-only | optional write-back of study sessions to Google Calendar |
+| Guest visitors share one demo profile | give every browser its own private guest profile, and support real Google sign-in |
+| Recal runs as one server process | move sign-in state into the database and run on Cloud Run for scale |
+| Google shows an "unverified app" warning | complete Google's app verification |
+| A video on a brand-new topic takes 2–3 minutes | reuse sources across users, and play scenes while the rest are still being made |
+| Calendar is read-only | optionally add study sessions to your Google Calendar |
+
+---
+
+## 20. Reference: API
+
+All endpoints are under `/api`. Your identity comes from the `recal_user` cookie, and the
+current chat from `recal_conv`.
+
+| Method | Path | Send | Get back |
+|---|---|---|---|
+| POST | `/api/chat` | `{message}` or `{action:{type,…}}` | live updates stream (§4) |
+| GET / POST | `/api/conversations` | — | list chats / start a new chat |
+| POST | `/api/auth` | `{guest:true}` | your user + cookie |
+| GET | `/api/connect/calendar` | `?return_to=` | Google sign-in link |
+| POST | `/api/connect/notebook` | `{return_to}` | Google sign-in link (Docs) |
+| GET | `/api/connect/google/callback` | from Google | back to the app |
+| GET | `/api/connect/google` | — | what's connected |
+| DELETE | `/api/connect/calendar`, `/api/connect/gdocs` | — | disconnect |
+| GET / POST | `/api/docs` | file upload | your documents / the new document |
+| GET | `/api/docs/{id}` | — | its sections |
+| POST | `/api/docs/{id}/review` | `{mode: "message" or "client_ready"}` | review card |
+| POST / DELETE | `/api/docs/{id}/coach` | slide number + audio | rehearsal feedback / reset |
+| POST | `/api/meeting/start`, `/turn`, `/end` | `{doc_id}`, `{said}`, — | client's line / reply / debrief |
+| POST | `/api/reels/{id}/render` | `{format: "mp4" or "pdf"}` | download link |
+| GET | `/api/reels/{id}/files/{name}` | — | the audio, video or PDF |
+| POST | `/api/feedback` | `{generation_id, signal: "up" or "down"}` | the learned style |
+| GET / POST | `/api/material/progress` | `{topic, page, total}` | study book progress |
+| GET | `/api/settings/llm` | — | which models are in use |
+| GET | `/api/health` | `?live=1` | readiness report |
+
+---
+
+## 21. Reference: settings
+
+Settings go in `.env`; on the server they're loaded from Secret Manager.
+
+| Setting | Default | What it controls |
+|---|---|---|
+| `GOOGLE_CLOUD_PROJECT` | — | your Google Cloud project (leave empty for mock mode) |
+| `GOOGLE_CLOUD_LOCATION` | `global` | where Gemini runs (`global` is required for the newest models) |
+| `GOOGLE_CLOUD_API_KEY` | — | optional key for Gemini (otherwise the service account is used) |
+| `MOCK` | — | `1` = always use demo content |
+| `MODEL_LITE`, `MODEL_FAST`, `MODEL_DEEP` | 3.5-flash-lite, 3.8-flash, 3.1-pro-preview | which Gemini model each tier uses |
+| `MODEL_EMBED` | `gemini-embedding-001` | the model that turns text into meaning-numbers |
+| `MODEL_TTS`, `MODEL_TTS_FALLBACK` | 3.8-flash-tts, 3.8-flash-lite-tts | narrator voices |
+| `TTS_VOICE` | `Kore` | which Gemini voice |
+| `TTS_STYLE` | `clear, friendly teaching voice` | how the narrator speaks (never read aloud) |
+| `LOCAL_TTS` | `1` | allow the computer's built-in voice as a backup |
+| `LLM_TIMEOUT_S` | `90` | how long to wait for one AI reply |
+| `REEL_MIN_SIMILARITY` | `0.6` | how closely a passage must match a topic |
+| `MAX_STUDY_MIN_PER_DAY` | `150` | daily study limit for the planner |
+| `RECAL_MEDIA_BUCKET` | — | Cloud Storage bucket for videos |
+| `RECAL_ENCRYPTION_KEY` | — | key for encrypting Google sign-in keys (32 random bytes, base64) |
+| `RECAL_KMS_KEY` | — | optional Google Cloud KMS key, used instead of the above |
+| `GOOGLE_OAUTH_CLIENT_ID`, `_SECRET` | — | Google sign-in app credentials |
+| `OAUTH_REDIRECT_BASE` | `http://localhost:8000` | the public address Google sends you back to |
+| `GUARD_ENABLED`, `GUARD_MAX_CHARS` | `1`, `4000` | safety check on/off and message length limit |
+| `RATE_LIMIT_PER_MIN` | `30` | requests per minute per user (`0` = off) |
+| `LOG_LEVEL`, `LOG_TO_FILE` | `INFO`, `1` | logging (`LOG_TO_FILE=0` on the server) |
+| `PROMPTS_FROM_DB` | — | `1` = allow editing AI instructions in the database |
+| `HTTP_USER_AGENT` | `RecalBot/0.2` | how Recal identifies itself to websites |
+| `RENDER_SSAA` | `2` | video smoothness (anti-aliasing) |
+
+---
+
+## 22. Reference: code map
+
+```
+backend/
+  main.py              starts the server, rate limits, serves the website
+  router/              the API: chat, sign-in, documents, meetings, videos, health
+  agents/              the chat assistant (Google ADK) and its tools
+  features/
+    llm.py             model picker: tiers, checks, retries with Pro, Plan B
+    intents.py         request planner
+    knowledge.py       knowledge library: search, read, find passages
+    motion.py          video pipeline        reel_engine.py, render.py  drawing + encoding
+    material.py        study book writer + critic
+    calendar.py        free time, planning, re-planning
+    documents.py       deck review            meeting.py, rehearse.py   AI client
+    memory.py          chat history, cards, style memory
+    google.py          Google sign-in, Calendar, Docs
+  database/            Firestore + Cloud Storage access, data layout, library storage
+  helper/              settings, safety layers, prompts.yml (every AI instruction), logging
+frontend/src/          the website: chat, Canvas, Week, Cards, Practice
+deploy/                server setup scripts and the deployment guide
+```
