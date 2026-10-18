@@ -26,13 +26,17 @@ try:
     from google import genai  # type: ignore
     from google.genai import types as genai_types  # type: ignore
 
+    # Server-side deadline per call: a request stalled in a congested queue comes back
+    # as 504 DEADLINE_EXCEEDED (retried once below) instead of hanging for minutes.
+    _http = genai_types.HttpOptions(timeout=settings.LLM_TIMEOUT_S * 1000)
     if settings.MOCK:
         _client = None
     elif settings.GOOGLE_CLOUD_API_KEY:      # API key: served from the global endpoint
-        _client = genai.Client(vertexai=True, api_key=settings.GOOGLE_CLOUD_API_KEY)
+        _client = genai.Client(vertexai=True, api_key=settings.GOOGLE_CLOUD_API_KEY,
+                               http_options=_http)
     elif settings.GOOGLE_CLOUD_PROJECT:
         _client = genai.Client(vertexai=True, project=settings.GOOGLE_CLOUD_PROJECT,
-                               location=settings.GOOGLE_CLOUD_LOCATION)
+                               location=settings.GOOGLE_CLOUD_LOCATION, http_options=_http)
     else:
         _client = None
 except Exception:  # noqa: BLE001
@@ -47,10 +51,18 @@ _MODELS = {"lite": settings.MODEL_LITE, "fast": settings.MODEL_FAST,
            "deep": settings.MODEL_DEEP}
 
 # ---------------------------------------------------------------------------
-# transient-error retry: Gemini answers 503 UNAVAILABLE ("model is experiencing
-# high demand") under load — retry twice with growing delay before giving up.
+# transient-error retry: under load Vertex answers 503 UNAVAILABLE ("model is
+# experiencing high demand") or 429 RESOURCE_EXHAUSTED (shared capacity momentarily
+# full, not a hard quota) — retry with growing delay before giving up. A 504 (our
+# LLM_TIMEOUT_S deadline expired) is retried once only: each one costs a full deadline.
 # ---------------------------------------------------------------------------
-RETRIES, RETRY_DELAY_S = 2, 2.0
+RETRIES, RETRY_DELAY_S = 3, 2.0
+_TRANSIENT = (429, 503)
+
+
+def _retryable(e: Exception, attempt: int) -> bool:
+    status = _status_of(e)
+    return status in _TRANSIENT or (status == 504 and attempt == 0)
 
 
 def _status_of(e: Exception) -> int:
@@ -64,13 +76,13 @@ def _status_of(e: Exception) -> int:
 
 
 def with_retry(call):
-    """Run call(); on a 503 retry up to RETRIES times (2s, then 4s). Any other
-    error raises immediately — only overload is worth waiting out."""
+    """Run call(); on a 429/503 retry up to RETRIES times (2s, 4s, 6s), on a 504
+    once. Any other error raises immediately — only overload is worth waiting out."""
     for attempt in range(RETRIES + 1):
         try:
             return call()
         except Exception as e:  # noqa: BLE001 — re-raised unless transient
-            if _status_of(e) != 503 or attempt == RETRIES:
+            if not _retryable(e, attempt) or attempt == RETRIES:
                 raise
             time.sleep(RETRY_DELAY_S * (attempt + 1))
 
@@ -86,7 +98,7 @@ def _stream_with_retry(make_iter):
                 yield chunk
             return
         except Exception as e:  # noqa: BLE001 — re-raised unless transient
-            if yielded or _status_of(e) != 503 or attempt == RETRIES:
+            if yielded or not _retryable(e, attempt) or attempt == RETRIES:
                 raise
             time.sleep(RETRY_DELAY_S * (attempt + 1))
 

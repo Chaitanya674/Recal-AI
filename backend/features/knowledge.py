@@ -242,7 +242,7 @@ def _wiki_query(query: str) -> tuple[str | None, str, str]:
     """One full-text Wikipedia search: (top hit as URL or None, spelling suggestion
     or '', failure reason or '')."""
     try:
-        r = httpx.get(WIKI_API, timeout=10.0, headers={"User-Agent": "RecalBot/0.1"},
+        r = httpx.get(WIKI_API, timeout=10.0, headers={"User-Agent": settings.HTTP_USER_AGENT},
                       params={"action": "query", "list": "search", "srsearch": query,
                               "srlimit": 1, "format": "json"},
                       verify=net.ssl_context())
@@ -320,7 +320,7 @@ def _web_search(query: str, k: int = 4) -> tuple[list[str], str]:
     try:
         r = httpx.get(settings.WEB_SEARCH_URL, params={"q": query}, timeout=12.0,
                       follow_redirects=True, verify=net.ssl_context(),
-                      headers={"User-Agent": "Mozilla/5.0 (compatible; RecalBot/0.1)"})
+                      headers={"User-Agent": settings.HTTP_USER_AGENT})
         if r.status_code != 200:
             return [], f"search endpoint answered HTTP {r.status_code} (bot challenge?)"
     except Exception as e:  # noqa: BLE001 — caller falls back to Wikipedia
@@ -340,35 +340,42 @@ def _web_search(query: str, k: int = 4) -> tuple[list[str], str]:
     return urls[:k], "" if urls else "no results"
 
 
-def _resolve_redirect(url: str) -> str:
-    """Grounding metadata URIs are Google redirect wrappers — store the real page."""
-    if "grounding-api-redirect" not in url and "vertexaisearch" not in url:
-        return url
+def _live_url(url: str) -> str | None:
+    """Final URL after redirects (grounding URIs are Google redirect wrappers), or
+    None when the page doesn't answer 2xx/3xx — headers only, the body isn't read."""
     try:
-        r = httpx.get(url, timeout=12.0, follow_redirects=True,
-                      headers={"User-Agent": "Mozilla/5.0 (compatible; RecalBot/0.1)"},
-                      verify=net.ssl_context())
-        return str(r.url)
-    except Exception:  # noqa: BLE001 — the wrapper itself still ingests fine
-        return url
+        with httpx.stream("GET", url, timeout=8.0, follow_redirects=True,
+                          headers={"User-Agent": settings.HTTP_USER_AGENT},
+                          verify=net.ssl_context()) as r:
+            return str(r.url) if r.status_code < 400 else None
+    except Exception:  # noqa: BLE001 — unreachable = not a source
+        return None
 
 
 def _grounded_sources(topic: str, k: int = 3) -> tuple[list[str], str]:
     """Google-Search-grounded source finding (primary): the pages developers actually
-    read — official docs, tutorials, engineering blogs. Needs a live Gemini client."""
+    read — official docs, tutorials, engineering blogs. Needs a live Gemini client.
+    The grounding metadata holds the pages Search really returned; URLs the model wrote
+    into its reply are often invented, so they only fill gaps — and every candidate is
+    checked live, so the chat never shows "Reading <url> … 404"."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from .llm import grounded_search
     try:
         data, meta = grounded_search(prompt_loader.get("find_sources", topic=topic))
     except Exception as e:  # noqa: BLE001 — quota/offline: next search layer takes over
         return [], f"{type(e).__name__}: {str(e)[:120]}"
+    written = [str(u) for u in (data.get("urls") or []) if str(u).startswith("http")]
+    candidates = list(dict.fromkeys(meta + written))[:8]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        resolved = list(pool.map(_live_url, candidates))
     urls: list[str] = []
-    for u in [str(u) for u in (data.get("urls") or []) if str(u).startswith("http")] + meta:
-        u = _resolve_redirect(u)
-        host = (urlparse(u).hostname or "").lower()
-        if host and not any(s in host for s in _SKIP_HOSTS) and u not in urls:
+    for u in resolved:
+        host = (urlparse(u or "").hostname or "").lower()
+        if u and host and not any(s in host for s in _SKIP_HOSTS) and u not in urls:
             urls.append(u)
     urls.sort(key=_rank_result, reverse=True)
-    return urls[:k], "" if urls else "no grounded results"
+    return urls[:k], "" if urls else "no reachable grounded results"
 
 
 def find_sources(topic: str) -> tuple[list[str], str]:
@@ -419,7 +426,7 @@ def _wiki_extract(url: str) -> tuple[str, str] | None:
     try:
         title = unquote(url.rsplit("/", 1)[-1]).replace("_", " ")
         r = httpx.get(f"https://{host}/w/api.php", timeout=20.0,
-                      headers={"User-Agent": "RecalBot/0.1"},
+                      headers={"User-Agent": settings.HTTP_USER_AGENT},
                       params={"action": "query", "prop": "extracts", "explaintext": 1,
                               "redirects": 1, "format": "json", "titles": title},
                       verify=net.ssl_context())
@@ -459,7 +466,7 @@ def _fetch_readable(url: str) -> tuple[str, str]:
     if wiki:
         return wiki
     r = httpx.get(url, timeout=20.0, follow_redirects=True,
-                  headers={"User-Agent": "Mozilla/5.0 (compatible; RecalBot/0.1)"},
+                  headers={"User-Agent": settings.HTTP_USER_AGENT},
                   verify=net.ssl_context())
     r.raise_for_status()
     html = r.text

@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 
-from . import fire
+from . import fire, schema
 from .vector_store import VectorStore
 
 
@@ -32,6 +32,7 @@ class GraphStore:
         self.edges: list[dict] = []
         self.by_kind: dict[str, list[str]] = defaultdict(list)
         self.vectors = VectorStore(user_id)
+        self._source_text: dict[str, str] = {}     # lazy cache of users/{uid}/sources
         if fire.enabled():
             self._load()
 
@@ -83,16 +84,38 @@ class GraphStore:
             except Exception:  # noqa: BLE001
                 pass
 
+    def save_source_text(self, source_id: str, text: str):
+        """Raw page text of a Source node. Kept off the node (users/{uid}/sources/{id})
+        so loading the graph never pulls whole pages; capped under Firestore's 1 MiB."""
+        self._source_text[source_id] = text
+        if fire.enabled():
+            try:
+                fire.set_doc({"text": text[:500_000], "meta": fire.meta()},
+                             *schema.sources(self.user_id), source_id)
+            except Exception:  # noqa: BLE001 — memory copy stays authoritative in-session
+                pass
+
+    def source_text(self, source_id: str) -> str:
+        if source_id not in self._source_text and fire.enabled():
+            try:
+                doc = fire.get_doc(*schema.sources(self.user_id), source_id) or {}
+                self._source_text[source_id] = doc.get("text", "")
+            except Exception:  # noqa: BLE001
+                return ""
+        return self._source_text.get(source_id, "")
+
     def purge(self):
         """Delete this user's graph everywhere (used when the embedding space changes)."""
         self.nodes.clear()
         self.edges.clear()
         self.by_kind.clear()
         self.vectors.clear()
+        self._source_text.clear()
         if fire.enabled():
             try:
                 fire.delete_col("users", self.user_id, "nodes")
                 fire.delete_col("users", self.user_id, "edges")
+                fire.delete_col(*schema.sources(self.user_id))
             except Exception:  # noqa: BLE001
                 pass
 

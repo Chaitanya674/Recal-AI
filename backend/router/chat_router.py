@@ -362,6 +362,9 @@ async def chat(body: ChatRequest, request: Request):
                     yield _sse("status", {"text": "planner: " + " -> ".join(
                         f"{s['action']}({s['topic'][:32]})" for s in steps)})
                 for step in steps:
+                    if prose:                     # compound turn: one paragraph per step
+                        prose.append("\n\n")
+                        yield _sse("token", {"delta": "\n\n"})
                     yield _sse("status", {"text": f"intent: {step['action']}"})
                     async for ev in handle(step):
                         yield ev

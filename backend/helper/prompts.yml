@@ -827,7 +827,8 @@ find_sources: |
     empty list if nothing does.
 
   # OUTPUT
-  ONLY this JSON object:
+  First, one sentence per chosen page saying what it teaches (this ties each pick to
+  the search result it came from). Then this JSON object:
   {{"urls": ["https://...", "https://...", "https://..."]}}
 
 model_knowledge: |

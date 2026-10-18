@@ -28,6 +28,9 @@ class Settings:
     MODEL_FAST: str = os.getenv("MODEL_FAST", "") or "gemini-3.8-flash"
     MODEL_DEEP: str = os.getenv("MODEL_DEEP", "") or "gemini-3.1-pro-preview"
     MODEL_EMBED: str = os.getenv("MODEL_EMBED", "") or "gemini-embedding-001"
+    # Per-call deadline (seconds) for Gemini requests; a stalled call fails fast and
+    # is retried once instead of hanging the chat for minutes.
+    LLM_TIMEOUT_S: int = int(os.getenv("LLM_TIMEOUT_S", "90"))
     SESSION_SECRET: str = os.getenv("SESSION_SECRET", "change-me")
     GOOGLE_CLOUD_PROJECT: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
     GOOGLE_CLOUD_LOCATION: str = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
@@ -73,6 +76,10 @@ class Settings:
         "GOOGLE_SCOPE_CALENDAR", "https://www.googleapis.com/auth/calendar.readonly")
     GOOGLE_SCOPE_GDOCS: str = os.getenv(
         "GOOGLE_SCOPE_GDOCS", "https://www.googleapis.com/auth/drive.file")
+    # Wikipedia's API policy requires a descriptive User-Agent with contact info
+    HTTP_USER_AGENT: str = os.getenv(
+        "HTTP_USER_AGENT",
+        "Mozilla/5.0 (compatible; RecalBot/0.2; +https://github.com/Chaitanya674/Recal-AI)")
     WIKI_API_URL: str = os.getenv("WIKI_API_URL", "https://en.wikipedia.org/w/api.php")
     WIKI_ARTICLE_BASE: str = os.getenv("WIKI_ARTICLE_BASE", "https://en.wikipedia.org/wiki/")
     # Keyless web search (HTML endpoint) used by find_sources to reach real docs/blogs;
