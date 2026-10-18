@@ -361,3 +361,7 @@ code{font-family:var(--mono);color:var(--text-2)}
 .meet-controls { display: flex; gap: .6rem; padding: .7rem 0; }
 .meet-controls input { flex: 1; padding: .5rem .7rem; border: 1px solid var(--line-2);
                        border-radius: 8px; background: var(--bg-2); color: var(--text); }
+
+/* feedback confirmation (👍 / 👎) */
+.fb-note{font-size:.72rem;color:var(--text-2);max-width:32rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;align-self:center}
+.fb-note.err{color:var(--bad)}

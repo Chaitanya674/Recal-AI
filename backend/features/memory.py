@@ -160,7 +160,8 @@ def record_generation(user: str, kind: str, output: str, reasoning: str,
     from .knowledge import get_graph
     gid = get_graph(user).add_generation(kind, output, reasoning,
                                          [c for c in chunk_ids if c])
-    _generations[gid] = {"user": user, "kind": kind, "reasoning": reasoning}
+    _generations[gid] = {"user": user, "kind": kind, "reasoning": reasoning,
+                         "output_summary": output[:4000]}
     if fire.enabled():
         try:
             fire.set_doc({"user": user, "kind": kind, "reasoning": reasoning[:20000],
@@ -172,17 +173,20 @@ def record_generation(user: str, kind: str, output: str, reasoning: str,
 
 
 def _distill(user: str, generation_id: str) -> str:
-    """The model's reasoning trace -> a reusable teaching approach (style_distill)."""
+    """The output the learner reacted to (+ the model's reasoning, when recorded) ->
+    a reusable teaching approach (style_distill)."""
     gen = _generations.get(generation_id)
     if gen is None and fire.enabled():
         gen = fire.get_doc(*schema.generations(user), generation_id)
-    trace = (gen or {}).get("reasoning", "") or (gen or {}).get("output_summary", "")
+    gen = gen or {}
+    parts = (gen.get("reasoning", ""), gen.get("output_summary", ""))
+    trace = "\n\n".join(x for x in parts if x)
     if settings.MOCK or not trace:
         return "open with a concrete failure case; one running analogy; short paragraphs"
     from ..helper import prompt_loader
     from .llm import chat_stream
     try:
-        text = "".join(chat_stream(prompt_loader.get("style_distill", trace=trace[:6000])))
+        text = "".join(chat_stream(prompt_loader.get("style_distill", content=trace[:6000])))
         return " ".join(text.split())[:200] or "keep it concrete and example-first"
     except Exception:  # noqa: BLE001
         return "keep it concrete and example-first"
@@ -212,9 +216,12 @@ def _store_style(user: str, descriptor: str, polarity: str, domain: str,
 
 
 def feedback(user: str, generation_id: str, signal: str, note: str = "") -> str | None:
+    """👍 -> the approach that worked is preferred; 👎 -> the approach is avoided (or the
+    learner's own note, when given). Returns the stored descriptor for the UI."""
     if signal == "down":
-        _store_style(user, note or "previous approach", "avoid", "any", generation_id)
-        return None
+        desc = note or _distill(user, generation_id)
+        _store_style(user, desc, "avoid", "any", generation_id)
+        return desc
     desc = _distill(user, generation_id)
     _store_style(user, desc, "prefer", "any", generation_id)
     return desc

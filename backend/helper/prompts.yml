@@ -306,14 +306,14 @@ summary_refresh: |
 
 style_distill: |
   # ROLE
-  You extract reusable teaching approaches. Below is the reasoning a model used while
-  writing an explanation (a reel or a study page) that the learner LOVED.
+  You extract reusable teaching approaches. Below is an explanation (a reel script or a
+  study page, plus the model's reasoning when available) that a learner reacted to.
 
   # INPUT
-  Reasoning: {trace}
+  {content}
 
   # TASK
-  Extract the TEACHING APPROACH that made it work — how it explained, not what it explained.
+  Extract the TEACHING APPROACH it used — how it explained, not what it explained.
 
   # RULES
   - <= 30 words, imperative voice, one line.

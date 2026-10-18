@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import MaterialSlides from './MaterialSlides.jsx'
 import ReelPlayer, { ReelDownloads } from './ReelPlayer.jsx'
 import { api } from '../lib/stream.js'
@@ -20,12 +20,26 @@ function Shell({ card, children, foot }) {
     </div>)
 }
 
+/** 👍 / 👎 teach Recal a style; the learned approach is confirmed inline. */
 export function Feedback({ generationId }) {
-  const send = (signal) => api('/api/feedback', { generation_id: generationId, signal })
-    .then(r => r.style_descriptor && alert('Style learned: ' + r.style_descriptor))
+  const [state, setState] = useState(null)   // null | {signal, busy} | {signal, text, err}
+  useEffect(() => setState(null), [generationId])
+  const send = (signal) => {
+    setState({ signal, busy: true })
+    api('/api/feedback', { generation_id: generationId, signal })
+      .then(r => setState({ signal, text: r.style_descriptor
+        ? (signal === 'up' ? 'Learned: ' : 'Will avoid: ') + r.style_descriptor
+        : 'Thanks, noted.' }))
+      .catch(() => setState({ signal, err: true, text: 'Couldn’t save that. Try again.' }))
+  }
+  if (state && !state.busy && !state.err)
+    return <span className="fb-note" title={state.text}>{state.signal === 'up' ? '👍' : '👎'} {state.text}</span>
   return (<>
-    <button onClick={() => send('up')}>👍 This clicked</button>
-    <button onClick={() => send('down')}>👎 Not for me</button>
+    {state?.err && <span className="fb-note err">{state.text}</span>}
+    <button disabled={!!state?.busy} onClick={() => send('up')}>
+      {state?.busy && state.signal === 'up' ? 'Learning…' : '👍 This clicked'}</button>
+    <button disabled={!!state?.busy} onClick={() => send('down')}>
+      {state?.busy && state.signal === 'down' ? 'Noting…' : '👎 Not for me'}</button>
   </>)
 }
 
