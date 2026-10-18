@@ -54,11 +54,18 @@ sudo rm -rf /var/log/journal/* "$APP_DIR/logs"
 echo "==> .env"
 cd "$APP_DIR"
 ENV_SECRET="${ENV_SECRET:-recal-env}"
-if gcloud secrets describe "$ENV_SECRET" >/dev/null 2>&1; then
-  # source of truth: Secret Manager (needs roles/secretmanager.secretAccessor on the VM's SA)
-  (umask 077; gcloud secrets versions access latest --secret="$ENV_SECRET" > .env)
+# source of truth: Secret Manager. Read the value directly: roles/secretmanager.secretAccessor
+# allows versions.access but not `gcloud secrets describe`.
+if (umask 077; gcloud secrets versions access latest --secret="$ENV_SECRET" > .env.secret 2>/dev/null) \
+   && [ -s .env.secret ]; then
+  mv .env.secret .env
   echo "    pulled from Secret Manager: $ENV_SECRET (latest version)"
-elif [ ! -f .env ]; then
+else
+  rm -f .env.secret
+  echo "    ! could not read secret '$ENV_SECRET': check it exists and the VM's service account"
+  echo "      has the 'Secret Manager Secret Accessor' role"
+fi
+if [ ! -f .env ]; then
   cat > .env <<EOF
 MOCK=
 SESSION_SECRET=$(openssl rand -hex 32)

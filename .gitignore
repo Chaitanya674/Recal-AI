@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.env.secret
 .venv/
 # Firebase service-account key — never commit
 firebase-key.json
